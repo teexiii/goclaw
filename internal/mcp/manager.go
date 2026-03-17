@@ -321,7 +321,11 @@ func (m *Manager) ActivateTools(names []string) {
 func (m *Manager) ActivateToolIfDeferred(name string) bool {
 	m.mu.RLock()
 	_, isDeferred := m.deferredTools[name]
+	_, isActivated := m.activatedTools[name]
 	m.mu.RUnlock()
+	if isActivated {
+		return true // already activated by a concurrent call
+	}
 	if !isDeferred {
 		return false
 	}

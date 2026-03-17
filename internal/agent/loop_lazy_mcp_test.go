@@ -277,3 +277,75 @@ func TestLoop_LazyMCP_PolicyDenyList_StillBlocked(t *testing.T) {
 		}
 	}
 }
+
+func TestLoop_LazyMCP_DenyList_BlockedOnFirstCall(t *testing.T) {
+	// Simulates the FULL loop behavior: TryActivateDeferred succeeds but IsDenied
+	// blocks the tool from executing on the CURRENT iteration (not just the next).
+	reg := tools.NewRegistry()
+	tool := &mockExecTool{name: "mcp_svc__exec_cmd"}
+
+	reg.SetDeferredActivator(func(name string) bool {
+		if name == "mcp_svc__exec_cmd" {
+			reg.Register(tool)
+			return true
+		}
+		return false
+	})
+
+	pe := tools.NewPolicyEngine(&config.ToolsConfig{
+		Deny: []string{"mcp_svc__exec_cmd"},
+	})
+	allowedTools := map[string]bool{}
+
+	// Simulate loop.go's lazy activation + deny check.
+	var result *tools.Result
+	toolName := "mcp_svc__exec_cmd"
+	if allowedTools != nil && !allowedTools[toolName] {
+		if reg.TryActivateDeferred(toolName) {
+			// This is the NEW deny check added by the fix.
+			if pe.IsDenied(toolName, nil) {
+				result = tools.ErrorResult("tool not allowed by policy: " + toolName)
+			} else {
+				allowedTools[toolName] = true
+			}
+		} else {
+			result = tools.ErrorResult("tool not allowed by policy: " + toolName)
+		}
+	}
+	if result == nil {
+		result = reg.ExecuteWithContext(context.Background(), toolName, nil, "", "", "", "", nil)
+	}
+
+	if !result.IsError {
+		t.Error("denied tool must be blocked even after lazy activation")
+	}
+	if tool.executed {
+		t.Error("denied tool must not execute")
+	}
+	if allowedTools[toolName] {
+		t.Error("denied tool must not be added to allowedTools")
+	}
+}
+
+func TestLoop_LazyMCP_DenyList_GroupDeny(t *testing.T) {
+	// Verify deny via group: pattern also blocks lazy activation.
+	reg := tools.NewRegistry()
+	tool := &mockExecTool{name: "mcp_svc__get_data"}
+
+	reg.SetDeferredActivator(func(name string) bool {
+		reg.Register(tool)
+		return true
+	})
+
+	// Register a custom group containing the MCP tool.
+	tools.RegisterToolGroup("mcp_test", []string{"mcp_svc__get_data"})
+	defer tools.UnregisterToolGroup("mcp_test")
+
+	pe := tools.NewPolicyEngine(&config.ToolsConfig{
+		Deny: []string{"group:mcp_test"},
+	})
+
+	if !pe.IsDenied("mcp_svc__get_data", nil) {
+		t.Error("tool should be denied via group: pattern")
+	}
+}

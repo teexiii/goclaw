@@ -93,11 +93,11 @@ func TestManager_ActivateToolIfDeferred_Idempotent(t *testing.T) {
 		t.Fatal("first activation should return true")
 	}
 
-	// Second call: tool is no longer in deferredTools → returns false.
-	// Must not panic and the tool must still be in the registry.
+	// Second call: tool is no longer in deferredTools but is in activatedTools.
+	// Must return true (idempotent) so concurrent goroutines don't get blocked.
 	second := m.ActivateToolIfDeferred(name)
-	if second {
-		t.Error("second call should return false — tool is no longer deferred")
+	if !second {
+		t.Error("second call should return true — tool is in activatedTools")
 	}
 	if _, ok := reg.Get(name); !ok {
 		t.Error("tool should still be in registry after second call")
@@ -166,23 +166,29 @@ func TestManager_ActivateToolIfDeferred_Concurrent(t *testing.T) {
 }
 
 func TestManager_ActivateToolIfDeferred_SameToolRace(t *testing.T) {
-	// Many goroutines racing to activate the same tool — no panic, no double-register.
+	// Many goroutines racing to activate the same tool — all must return true.
 	m, reg := setupSearchModeManager(t, "svc", []string{"shared_tool"})
 	name := makeBridgeTool("svc", "shared_tool").Name()
 
 	const goroutines = 20
+	results := make([]bool, goroutines)
 	var wg sync.WaitGroup
-	for range goroutines {
+	for i := range goroutines {
 		wg.Add(1)
-		go func() {
+		go func(idx int) {
 			defer wg.Done()
-			m.ActivateToolIfDeferred(name)
-		}()
+			results[idx] = m.ActivateToolIfDeferred(name)
+		}(i)
 	}
 	wg.Wait()
 
 	if _, ok := reg.Get(name); !ok {
 		t.Error("tool should be in registry after concurrent activation")
+	}
+	for i, ok := range results {
+		if !ok {
+			t.Errorf("goroutine %d got false — all should return true (idempotent)", i)
+		}
 	}
 }
 

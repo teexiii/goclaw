@@ -65,6 +65,11 @@ func (h *AgentsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/agents/{id}/instances/{userID}/files", h.authMiddleware(h.handleGetInstanceFiles))
 	mux.HandleFunc("PUT /v1/agents/{id}/instances/{userID}/files/{fileName}", h.authMiddleware(h.handleSetInstanceFile))
 	mux.HandleFunc("PATCH /v1/agents/{id}/instances/{userID}/metadata", h.authMiddleware(h.handleUpdateInstanceMetadata))
+
+	// Agent-level context files (SOUL.md, AGENTS.md, etc.)
+	mux.HandleFunc("GET /v1/agents/{id}/files", h.authMiddleware(h.handleListFiles))
+	mux.HandleFunc("GET /v1/agents/{id}/files/{fileName}", h.authMiddleware(h.handleGetFile))
+	mux.HandleFunc("PUT /v1/agents/{id}/files/{fileName}", h.authMiddleware(h.handleSetFile))
 }
 
 func (h *AgentsHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {

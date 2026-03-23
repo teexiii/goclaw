@@ -10,7 +10,7 @@ import (
 )
 
 // wireHTTP creates HTTP handlers (agents + skills + traces + MCP + channel instances + providers + builtin tools + pending messages).
-func wireHTTP(stores *store.Stores, token, defaultWorkspace, dataDir, bundledSkillsDir string, msgBus *bus.MessageBus, toolsReg *tools.Registry, providerReg *providers.Registry, isOwner func(string) bool, gatewayAddr string, mcpToolLister httpapi.MCPToolLister) (*httpapi.AgentsHandler, *httpapi.SkillsHandler, *httpapi.TracesHandler, *httpapi.MCPHandler, *httpapi.ChannelInstancesHandler, *httpapi.ProvidersHandler, *httpapi.BuiltinToolsHandler, *httpapi.PendingMessagesHandler, *httpapi.TeamEventsHandler, *httpapi.SecureCLIHandler, *httpapi.MCPUserCredentialsHandler) {
+func wireHTTP(stores *store.Stores, token, defaultWorkspace, dataDir, bundledSkillsDir string, msgBus *bus.MessageBus, toolsReg *tools.Registry, providerReg *providers.Registry, isOwner func(string) bool, gatewayAddr string, mcpToolLister httpapi.MCPToolLister) (*httpapi.AgentsHandler, *httpapi.SkillsHandler, *httpapi.TracesHandler, *httpapi.MCPHandler, *httpapi.ChannelInstancesHandler, *httpapi.ProvidersHandler, *httpapi.BuiltinToolsHandler, *httpapi.PendingMessagesHandler, *httpapi.TeamsHandler, *httpapi.TeamEventsHandler, *httpapi.SecureCLIHandler, *httpapi.MCPUserCredentialsHandler) {
 	var agentsH *httpapi.AgentsHandler
 	var skillsH *httpapi.SkillsHandler
 	var tracesH *httpapi.TracesHandler
@@ -62,8 +62,12 @@ func wireHTTP(stores *store.Stores, token, defaultWorkspace, dataDir, bundledSki
 		}
 	}
 
+	var teamsH *httpapi.TeamsHandler
 	var teamEventsH *httpapi.TeamEventsHandler
 
+	if stores != nil && stores.Teams != nil && stores.Agents != nil {
+		teamsH = httpapi.NewTeamsHandler(stores.Teams, stores.Agents, stores.AgentLinks, token, msgBus)
+	}
 	if stores != nil && stores.Teams != nil {
 		teamEventsH = httpapi.NewTeamEventsHandler(stores.Teams, token)
 	}
@@ -80,5 +84,5 @@ func wireHTTP(stores *store.Stores, token, defaultWorkspace, dataDir, bundledSki
 		secureCLIH = httpapi.NewSecureCLIHandler(stores.SecureCLI, token, msgBus)
 	}
 
-	return agentsH, skillsH, tracesH, mcpH, channelInstancesH, providersH, builtinToolsH, pendingMessagesH, teamEventsH, secureCLIH, mcpUserCredsH
+	return agentsH, skillsH, tracesH, mcpH, channelInstancesH, providersH, builtinToolsH, pendingMessagesH, teamsH, teamEventsH, secureCLIH, mcpUserCredsH
 }

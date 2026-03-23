@@ -51,24 +51,40 @@ api() {
   local method="$1" path="$2"
   shift 2
   local url="${BASE_URL}${path}"
-  local resp
-  resp=$(curl -s -w '\n%{http_code}' -X "$method" "$url" "${AUTH_HEADERS[@]}" "$@")
-  local code
+  local resp code body
+  resp=$(curl -s -w '\n%{http_code}' -X "$method" "$url" "${AUTH_HEADERS[@]}" "$@" 2>&1) || true
   code=$(echo "$resp" | tail -1)
-  local body
   body=$(echo "$resp" | sed '$d')
 
-  if [[ "$code" -ge 200 && "$code" -lt 300 ]]; then
-    echo "$body"
-  elif [[ "$code" == "409" ]]; then
-    warn "Already exists (409), skipping..."
-    echo "$body"
-  else
-    err "HTTP $code from $method $path"
-    err "$body"
-    return 1
-  fi
+  case "$code" in
+    000)
+      err "Cannot connect to $BASE_URL — is the gateway running?"
+      [[ -n "$body" ]] && err "$body"
+      exit 1
+      ;;
+    2[0-9][0-9])
+      echo "$body"
+      ;;
+    409)
+      warn "Already exists (409), skipping..."
+      echo "$body"
+      ;;
+    *)
+      err "HTTP $code from $method $path"
+      [[ -n "$body" ]] && err "$body"
+      exit 1
+      ;;
+  esac
 }
+
+# Pre-flight: check gateway is reachable
+log "Checking gateway at $BASE_URL..."
+if ! curl -sf "${BASE_URL}/health" > /dev/null 2>&1; then
+  err "Gateway not reachable at $BASE_URL"
+  err "Start with: ./goclaw  (or set GOCLAW_URL)"
+  exit 1
+fi
+log "Gateway OK"
 
 # ─────────────────────────────────────────────
 # Helper: set agent context file via REST API

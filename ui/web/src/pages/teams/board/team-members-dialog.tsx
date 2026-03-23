@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/ui/combobox";
 import { Bot, UserPlus, X, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router";
 import { useAgents } from "@/pages/agents/hooks/use-agents";
 import type { TeamMemberData } from "@/types/team";
 
@@ -141,9 +142,9 @@ export function TeamMembersDialog({
               )}
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <span className="truncate text-sm font-medium">
+                  <Link to={`/agents/${m.agent_id}`} className="truncate text-sm font-medium hover:underline">
                     {m.display_name || m.agent_key || m.agent_id.slice(0, 8)}
-                  </span>
+                  </Link>
                   <Badge variant="outline" className={`shrink-0 text-[10px] px-1.5 py-0 ${ROLE_COLORS[m.role] ?? ""}`}>
                     {m.role}
                   </Badge>

@@ -25,7 +25,7 @@ func (t *TeamTasksTool) executeClaim(ctx context.Context, args map[string]any) *
 	}
 
 	ownerKey := t.manager.agentKeyFromID(ctx, agentID)
-	t.manager.broadcastTeamEvent(protocol.EventTeamTaskClaimed, protocol.TeamTaskEventPayload{
+	t.manager.broadcastTeamEvent(ctx, protocol.EventTeamTaskClaimed, protocol.TeamTaskEventPayload{
 		TeamID:           team.ID.String(),
 		TaskID:           taskID.String(),
 		Status:           store.TeamTaskStatusInProgress,
@@ -82,7 +82,7 @@ func (t *TeamTasksTool) executeComplete(ctx context.Context, args map[string]any
 		taskNumber = completedTask.TaskNumber
 		taskSubject = completedTask.Subject
 	}
-	t.manager.broadcastTeamEvent(protocol.EventTeamTaskCompleted, protocol.TeamTaskEventPayload{
+	t.manager.broadcastTeamEvent(ctx, protocol.EventTeamTaskCompleted, protocol.TeamTaskEventPayload{
 		TeamID:           team.ID.String(),
 		TaskID:           taskID.String(),
 		TaskNumber:       taskNumber,
@@ -135,7 +135,7 @@ func (t *TeamTasksTool) executeCancel(ctx context.Context, args map[string]any) 
 		return ErrorResult("failed to cancel task: " + err.Error())
 	}
 
-	t.manager.broadcastTeamEvent(protocol.EventTeamTaskCancelled, protocol.TeamTaskEventPayload{
+	t.manager.broadcastTeamEvent(ctx, protocol.EventTeamTaskCancelled, protocol.TeamTaskEventPayload{
 		TeamID:    team.ID.String(),
 		TaskID:    taskID.String(),
 		Status:    store.TeamTaskStatusCancelled,
@@ -181,7 +181,7 @@ func (t *TeamTasksTool) executeReview(ctx context.Context, args map[string]any) 
 	}
 
 	ownerKey := t.manager.agentKeyFromID(ctx, agentID)
-	t.manager.broadcastTeamEvent(protocol.EventTeamTaskReviewed, protocol.TeamTaskEventPayload{
+	t.manager.broadcastTeamEvent(ctx, protocol.EventTeamTaskReviewed, protocol.TeamTaskEventPayload{
 		TeamID:           team.ID.String(),
 		TaskID:           taskID.String(),
 		Status:           store.TeamTaskStatusInReview,
@@ -245,7 +245,7 @@ func (t *TeamTasksTool) executeApprove(ctx context.Context, args map[string]any)
 		newStatus = approved.Status
 	}
 
-	t.manager.broadcastTeamEvent(protocol.EventTeamTaskApproved, protocol.TeamTaskEventPayload{
+	t.manager.broadcastTeamEvent(ctx, protocol.EventTeamTaskApproved, protocol.TeamTaskEventPayload{
 		TeamID:    team.ID.String(),
 		TaskID:    taskID.String(),
 		Subject:   task.Subject,
@@ -258,15 +258,12 @@ func (t *TeamTasksTool) executeApprove(ctx context.Context, args map[string]any)
 		ActorID:   t.manager.agentKeyFromID(ctx, agentID),
 	})
 
-	// Inject message to lead agent via mailbox
-	msg := fmt.Sprintf("Task '%s' (id=%s) has been approved by the user (status: %s).", task.Subject, task.ID, newStatus)
-	_ = t.manager.teamStore.SendMessage(ctx, &store.TeamMessageData{
-		TeamID:      team.ID,
-		FromAgentID: team.LeadAgentID,
-		ToAgentID:   &team.LeadAgentID,
-		Content:     msg,
-		MessageType: store.TeamMessageTypeChat,
-		TaskID:      &taskID,
+	// Record approval as a task comment for audit trail.
+	approveMsg := fmt.Sprintf("Task approved (status: %s).", newStatus)
+	_ = t.manager.teamStore.AddTaskComment(ctx, &store.TeamTaskCommentData{
+		TaskID:  taskID,
+		AgentID: &agentID,
+		Content: approveMsg,
 	})
 
 	return NewResult(fmt.Sprintf("Task %s approved (status: %s).", taskID, newStatus))
@@ -316,7 +313,7 @@ func (t *TeamTasksTool) executeReject(ctx context.Context, args map[string]any) 
 		return ErrorResult("failed to reject task: " + err.Error())
 	}
 
-	t.manager.broadcastTeamEvent(protocol.EventTeamTaskRejected, protocol.TeamTaskEventPayload{
+	t.manager.broadcastTeamEvent(ctx, protocol.EventTeamTaskRejected, protocol.TeamTaskEventPayload{
 		TeamID:    team.ID.String(),
 		TaskID:    taskID.String(),
 		Subject:   task.Subject,
@@ -330,15 +327,12 @@ func (t *TeamTasksTool) executeReject(ctx context.Context, args map[string]any) 
 		ActorID:   t.manager.agentKeyFromID(ctx, agentID),
 	})
 
-	// Inject message to lead agent via mailbox
-	leadMsg := fmt.Sprintf("Task '%s' (id=%s) was rejected by the user. Reason: %s", task.Subject, task.ID, reason)
-	_ = t.manager.teamStore.SendMessage(ctx, &store.TeamMessageData{
-		TeamID:      team.ID,
-		FromAgentID: team.LeadAgentID,
-		ToAgentID:   &team.LeadAgentID,
-		Content:     leadMsg,
-		MessageType: store.TeamMessageTypeChat,
-		TaskID:      &taskID,
+	// Record rejection as a task comment for audit trail.
+	rejectMsg := fmt.Sprintf("Task rejected. Reason: %s", reason)
+	_ = t.manager.teamStore.AddTaskComment(ctx, &store.TeamTaskCommentData{
+		TaskID:  taskID,
+		AgentID: &agentID,
+		Content: rejectMsg,
 	})
 
 	return NewResult(fmt.Sprintf("Task %s rejected. Dependent tasks have been unblocked.", taskID))

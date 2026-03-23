@@ -11,17 +11,17 @@
 #   - python3 or jq (for JSON escaping in file content)
 #
 # Usage:
-#   export GOCLAW_TOKEN="your-gateway-token"
+#   export GOCLAW_TOKEN="your-gateway-token"  (or GOCLAW_GATEWAY_TOKEN)
 #   export GOCLAW_USER_ID="system"  # or your user ID
 #   bash scripts/setup-translation-team.sh
 #
-set -euo pipefail
+set -uo pipefail
 
 # ─────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────
 BASE_URL="${GOCLAW_URL:-http://localhost:18790}"
-TOKEN="${GOCLAW_TOKEN:?Set GOCLAW_TOKEN}"
+TOKEN="${GOCLAW_TOKEN:-${GOCLAW_GATEWAY_TOKEN:?Set GOCLAW_TOKEN or GOCLAW_GATEWAY_TOKEN}}"
 USER_ID="${GOCLAW_USER_ID:-system}"
 AUTH_HEADERS=(
   -H "Authorization: Bearer $TOKEN"
@@ -51,28 +51,30 @@ api() {
   local method="$1" path="$2"
   shift 2
   local url="${BASE_URL}${path}"
-  local resp code body
-  resp=$(curl -s -w '\n%{http_code}' -X "$method" "$url" "${AUTH_HEADERS[@]}" "$@" 2>&1) || true
-  code=$(echo "$resp" | tail -1)
-  body=$(echo "$resp" | sed '$d')
+  local tmpfile
+  tmpfile=$(mktemp)
+  local code
+  code=$(curl -s -o "$tmpfile" -w '%{http_code}' -X "$method" "$url" "${AUTH_HEADERS[@]}" "$@" 2>/dev/null) || code="000"
+  local body
+  body=$(cat "$tmpfile")
+  rm -f "$tmpfile"
 
   case "$code" in
     000)
-      err "Cannot connect to $BASE_URL — is the gateway running?"
-      [[ -n "$body" ]] && err "$body"
+      err "Cannot connect to $BASE_URL — is the gateway running?" >&2
       exit 1
       ;;
     2[0-9][0-9])
       echo "$body"
       ;;
     409)
-      warn "Already exists (409), skipping..."
+      warn "Already exists (409), skipping..." >&2
       echo "$body"
       ;;
     *)
-      err "HTTP $code from $method $path"
-      [[ -n "$body" ]] && err "$body"
-      exit 1
+      err "HTTP $code from $method $path" >&2
+      [[ -n "$body" ]] && err "$body" >&2
+      return 1
       ;;
   esac
 }
@@ -85,6 +87,15 @@ if ! curl -sf "${BASE_URL}/health" > /dev/null 2>&1; then
   exit 1
 fi
 log "Gateway OK"
+
+# Check zip is available (needed for skill upload)
+if ! command -v zip &>/dev/null; then
+  warn "zip not found — skill upload will be skipped"
+  warn "Install: apt install zip  OR  brew install zip"
+  SKIP_SKILLS=1
+else
+  SKIP_SKILLS=0
+fi
 
 # ─────────────────────────────────────────────
 # Helper: set agent context file via REST API
@@ -99,6 +110,22 @@ set_agent_file() {
 
   api PUT "/v1/agents/${agent_key}/files/${file_name}" \
     -d "{\"content\":$escaped}" > /dev/null
+}
+
+# ─────────────────────────────────────────────
+# Helper: extract agent UUID from response or fetch by key
+# ─────────────────────────────────────────────
+get_agent_id() {
+  local resp="$1" agent_key="$2"
+  local id
+  id=$(echo "$resp" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ -z "$id" ]]; then
+    # Agent already exists (409) — fetch by key
+    local get_resp
+    get_resp=$(api GET "/v1/agents/${agent_key}") || true
+    id=$(echo "$get_resp" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  fi
+  echo "$id"
 }
 
 # ═══════════════════════════════════════════════
@@ -136,8 +163,8 @@ MANAGER_RESP=$(api POST /v1/agents -d "$(cat <<'AGENT_JSON'
   }
 }
 AGENT_JSON
-)")
-MANAGER_ID=$(echo "$MANAGER_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+)") || true
+MANAGER_ID=$(get_agent_id "$MANAGER_RESP" "translation-manager")
 info "Manager ID: ${MANAGER_ID:-unknown}"
 
 # --- Agent 2: Translator (Member) ---
@@ -166,8 +193,8 @@ TRANSLATOR_RESP=$(api POST /v1/agents -d "$(cat <<'AGENT_JSON'
   }
 }
 AGENT_JSON
-)")
-TRANSLATOR_ID=$(echo "$TRANSLATOR_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+)") || true
+TRANSLATOR_ID=$(get_agent_id "$TRANSLATOR_RESP" "translator")
 info "Translator ID: ${TRANSLATOR_ID:-unknown}"
 
 # --- Agent 3: Reviewer (Member) ---
@@ -194,8 +221,8 @@ REVIEWER_RESP=$(api POST /v1/agents -d "$(cat <<'AGENT_JSON'
   }
 }
 AGENT_JSON
-)")
-REVIEWER_ID=$(echo "$REVIEWER_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+)") || true
+REVIEWER_ID=$(get_agent_id "$REVIEWER_RESP" "translation-reviewer")
 info "Reviewer ID: ${REVIEWER_ID:-unknown}"
 
 # ═══════════════════════════════════════════════
@@ -335,6 +362,11 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Step 3: Creating & uploading 4 Skills"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [[ "$SKIP_SKILLS" == "1" ]]; then
+  warn "Skipping skill upload (zip not available)"
+  SKILL1_ID="" ; SKILL2_ID="" ; SKILL3_ID="" ; SKILL4_ID=""
+else
 
 # ── Skill 1: dich-van-ban ──
 log "Building skill: dich-van-ban..."
@@ -655,6 +687,8 @@ SKILL4_CODE=$(echo "$SKILL4_RESP" | tail -1)
 SKILL4_BODY=$(echo "$SKILL4_RESP" | sed '$d')
 SKILL4_ID=$(echo "$SKILL4_BODY" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 info "review-ban-dich ID: ${SKILL4_ID:-upload_failed ($SKILL4_CODE)}"
+
+fi  # end SKIP_SKILLS check
 
 # ═══════════════════════════════════════════════
 #  STEP 4: Grant Skills to Agents

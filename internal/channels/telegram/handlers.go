@@ -148,8 +148,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		default: // "pairing" or unknown → secure default
 			paired := false
 			if c.pairingService != nil {
-				p1, err1 := c.pairingService.IsPaired(userID, c.Name())
-				p2, err2 := c.pairingService.IsPaired(senderID, c.Name())
+				p1, err1 := c.pairingService.IsPaired(ctx, userID, c.Name())
+				p2, err2 := c.pairingService.IsPaired(ctx, senderID, c.Name())
 				if err1 != nil || err2 != nil {
 					slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
 						"user_id", userID, "channel", c.Name(), "err1", err1, "err2", err2)
@@ -256,7 +256,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			if topicCfg.groupPolicy == "pairing" && c.pairingService != nil {
 				if _, cached := c.approvedGroups.Load(chatIDStr); !cached {
 					groupSenderID := fmt.Sprintf("group:%d", chatID)
-					paired, pairErr := c.pairingService.IsPaired(groupSenderID, c.Name())
+					paired, pairErr := c.pairingService.IsPaired(ctx, groupSenderID, c.Name())
 					if pairErr != nil {
 						slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
 							"group_sender", groupSenderID, "channel", c.Name(), "error", pairErr)
@@ -295,7 +295,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	if isGroup && topicCfg.groupPolicy == "pairing" && c.pairingService != nil {
 		if _, cached := c.approvedGroups.Load(chatIDStr); !cached {
 			groupSenderID := fmt.Sprintf("group:%d", chatID)
-			paired, err := c.pairingService.IsPaired(groupSenderID, c.Name())
+			paired, err := c.pairingService.IsPaired(ctx, groupSenderID, c.Name())
 			if err != nil {
 				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
 					"group_sender", groupSenderID, "channel", c.Name(), "error", err)
@@ -313,16 +313,22 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	// --- Media download (only when bot will process the message) ---
 	// Deferred until after mention + pairing gates to avoid downloading
 	// media for messages that only get recorded in pending history.
-	mediaList := c.resolveMedia(ctx, message)
-	if message.ReplyToMessage != nil && len(mediaList) == 0 {
-		replyMedia := c.resolveMedia(ctx, message.ReplyToMessage)
+	mediaList, mediaErrors := c.resolveMedia(ctx, message)
+	if message.ReplyToMessage != nil {
+		replyMedia, replyErrors := c.resolveMedia(ctx, message.ReplyToMessage)
 		if len(replyMedia) > 0 {
-			mediaList = append(mediaList, replyMedia...)
+			// Tag reply media so LLM knows which images came from the replied-to message.
+			for i := range replyMedia {
+				replyMedia[i].FromReply = true
+			}
+			// Reply media first (context), current media second.
+			mediaList = append(replyMedia, mediaList...)
 			slog.Debug("telegram: resolved media from replied message",
 				"reply_msg_id", message.ReplyToMessage.MessageID,
 				"media_count", len(replyMedia),
 			)
 		}
+		mediaErrors = append(mediaErrors, replyErrors...)
 	}
 
 	var mediaFiles []bus.MediaFile
@@ -373,6 +379,31 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		}
 		if extraContent != "" {
 			content += extraContent
+		}
+	}
+
+	// Annotate content + notify user for any media download failures.
+	// Replace the per-type lightweight tag with an error-annotated version so the
+	// model knows the specific media was skipped and why.
+	if len(mediaErrors) > 0 {
+		for _, me := range mediaErrors {
+			errTag := fmt.Sprintf("[sent media (%s) — skipped: %s]", me.Type, me.Reason)
+			if lightTag := lightweightTagForType(me.Type, message); lightTag != "" {
+				content = strings.Replace(content, lightTag, errTag, 1)
+			} else {
+				content = errTag + "\n" + content
+			}
+		}
+
+		// Send a short reply so the user knows their file was skipped.
+		for _, me := range mediaErrors {
+			var errText string
+			if me.MaxBytes > 0 {
+				errText = fmt.Sprintf("⚠️ File too large (max %d MB). Skipped.", me.MaxBytes/(1024*1024))
+			} else {
+				errText = "⚠️ Failed to download the attached file. Skipped."
+			}
+			_ = c.sendHTML(ctx, chatID, errText, 0, messageThreadID)
 		}
 	}
 

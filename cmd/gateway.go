@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/google/uuid"
@@ -45,6 +46,21 @@ func runGateway() {
 	if verbose {
 		logLevel = slog.LevelDebug
 	}
+	// Env override (docker/K8s friendly, default: info): GOCLAW_LOG_LEVEL=debug|info|warn|error
+	if lvl := os.Getenv("GOCLAW_LOG_LEVEL"); lvl != "" {
+		switch strings.ToLower(lvl) {
+		case "debug":
+			logLevel = slog.LevelDebug
+		case "info":
+			logLevel = slog.LevelInfo
+		case "warn":
+			logLevel = slog.LevelWarn
+		case "error":
+			logLevel = slog.LevelError
+		default:
+			fmt.Fprintf(os.Stderr, "warning: unknown GOCLAW_LOG_LEVEL=%q, using info\n", lvl)
+		}
+	}
 	textHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: logLevel,
 	})
@@ -64,7 +80,7 @@ func runGateway() {
 	msgBus := bus.New()
 
 	// Create provider registry
-	providerRegistry := providers.NewRegistry()
+	providerRegistry := providers.NewRegistry(store.TenantIDFromContext)
 	registerProviders(providerRegistry, cfg)
 
 	// Resolve workspace (must be absolute for system prompt + file tool path resolution)
@@ -117,8 +133,8 @@ func runGateway() {
 		// Wire announce queue for batched subagent result delivery (matching TS debounce pattern)
 		announceQueue := tools.NewAnnounceQueue(1000, 20,
 			func(sessionKey string, items []tools.AnnounceQueueItem, meta tools.AnnounceMetadata) {
-				remainingActive := subagentMgr.CountRunningForParent(meta.ParentAgent)
-				content := tools.FormatBatchedAnnounce(items, remainingActive)
+				roster := subagentMgr.RosterForParent(meta.ParentAgent)
+				content := tools.FormatBatchedAnnounce(items, roster)
 				senderID := fmt.Sprintf("subagent:batch-%d", len(items))
 				label := items[0].Label
 				if len(items) > 1 {
@@ -143,18 +159,23 @@ func runGateway() {
 				for _, item := range items {
 					batchMedia = append(batchMedia, item.Media...)
 				}
+				// Notify clients that leader is processing team results
+				// (bridges UI gap between last task.completed and announce run.started).
+				bus.BroadcastForTenant(msgBus, protocol.EventTeamLeaderProcessing, meta.OriginTenantID, map[string]any{
+					"agentId": meta.ParentAgent,
+					"tasks":   len(items),
+				})
+
 				msgBus.PublishInbound(bus.InboundMessage{
 					Channel:  "system",
 					SenderID: senderID,
 					ChatID:   meta.OriginChatID,
 					Content:  content,
 					UserID:   meta.OriginUserID,
+					TenantID: meta.OriginTenantID,
 					Metadata: batchMeta,
 					Media:    batchMedia,
 				})
-			},
-			func(parentID string) int {
-				return subagentMgr.CountRunningForParent(parentID)
 			},
 		)
 		subagentMgr.SetAnnounceQueue(announceQueue)
@@ -163,7 +184,7 @@ func runGateway() {
 		slog.Info("subagent system enabled", "tools", []string{"spawn"})
 	}
 
-	skillsLoader, skillSearchTool, globalSkillsDir := setupSkillsSystem(cfg, workspace, dataDir, pgStores, toolsReg, providerRegistry, msgBus)
+	skillsLoader, skillSearchTool, globalSkillsDir, bundledSkillsDir := setupSkillsSystem(cfg, workspace, dataDir, pgStores, toolsReg, providerRegistry, msgBus)
 	_ = skillSearchTool // used via wireExtras → skillsLoader; kept for type clarity
 
 	// DateTime tool (precise time for cron scheduling, memory timestamps, etc.)
@@ -187,6 +208,8 @@ func runGateway() {
 
 	// Message tool (send to channels)
 	toolsReg.Register(tools.NewMessageTool(workspace, agentCfg.RestrictToWorkspace))
+	// Group members tool (list members in group chats)
+	toolsReg.Register(tools.NewListGroupMembersTool())
 	slog.Info("session + message tools registered")
 
 	// Register legacy tool aliases (backward-compat names from policy.go).
@@ -273,19 +296,10 @@ func runGateway() {
 		server.SetAgentStore(pgStores.Agents)
 	}
 
-	// Dynamic custom tools: load global tools from DB before resolver
-	var dynamicLoader *tools.DynamicToolLoader
-	if pgStores.CustomTools != nil {
-		dynamicLoader = tools.NewDynamicToolLoader(pgStores.CustomTools, workspace)
-		if err := dynamicLoader.LoadGlobal(context.Background(), toolsReg); err != nil {
-			slog.Warn("failed to load global custom tools", "error", err)
-		}
-	}
-
 	var mcpPool *mcpbridge.Pool
 	var mediaStore *media.Store
 	var postTurn tools.PostTurnProcessor
-	contextFileInterceptor, mcpPool, mediaStore, postTurn = wireExtras(pgStores, agentRouter, providerRegistry, msgBus, pgStores.Sessions, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, dynamicLoader, redisClient)
+	contextFileInterceptor, mcpPool, mediaStore, postTurn = wireExtras(pgStores, agentRouter, providerRegistry, msgBus, pgStores.Sessions, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, redisClient)
 	if mcpPool != nil {
 		defer mcpPool.Stop()
 	}
@@ -294,7 +308,7 @@ func runGateway() {
 	if mcpMgr != nil {
 		mcpToolLister = mcpMgr
 	}
-	agentsH, skillsH, tracesH, mcpH, customToolsH, channelInstancesH, providersH, delegationsH, builtinToolsH, pendingMessagesH, teamEventsH, secureCLIH := wireHTTP(pgStores, cfg.Gateway.Token, cfg.Agents.Defaults.Workspace, msgBus, toolsReg, providerRegistry, permPE.IsOwner, gatewayAddr, mcpToolLister)
+	agentsH, skillsH, tracesH, mcpH, channelInstancesH, providersH, builtinToolsH, pendingMessagesH, teamEventsH, secureCLIH, mcpUserCredsH := wireHTTP(pgStores, cfg.Gateway.Token, cfg.Agents.Defaults.Workspace, dataDir, bundledSkillsDir, msgBus, toolsReg, providerRegistry, permPE.IsOwner, gatewayAddr, mcpToolLister)
 	if providersH != nil {
 		providersH.SetAPIBaseFallback(cfg.Providers.APIBaseForType)
 	}
@@ -309,12 +323,18 @@ func runGateway() {
 	}
 	// External wake/trigger API
 	wakeH := httpapi.NewWakeHandler(agentRouter, cfg.Gateway.Token)
+	if postTurn != nil {
+		wakeH.SetPostTurnProcessor(postTurn)
+	}
 	server.SetWakeHandler(wakeH)
 	if mcpH != nil {
+		if mcpPool != nil {
+			mcpH.SetPoolEvictor(mcpPool)
+		}
 		server.SetMCPHandler(mcpH)
 	}
-	if customToolsH != nil {
-		server.SetCustomToolsHandler(customToolsH)
+	if mcpUserCredsH != nil {
+		server.SetMCPUserCredentialsHandler(mcpUserCredsH)
 	}
 	if channelInstancesH != nil {
 		server.SetChannelInstancesHandler(channelInstancesH)
@@ -322,11 +342,11 @@ func runGateway() {
 	if providersH != nil {
 		server.SetProvidersHandler(providersH)
 	}
-	if delegationsH != nil {
-		server.SetDelegationsHandler(delegationsH)
-	}
 	if teamEventsH != nil {
 		server.SetTeamEventsHandler(teamEventsH)
+	}
+	if pgStores != nil && pgStores.Teams != nil {
+		server.SetTeamAttachmentsHandler(httpapi.NewTeamAttachmentsHandler(pgStores.Teams, cfg.Gateway.Token, workspace))
 	}
 	if builtinToolsH != nil {
 		server.SetBuiltinToolsHandler(builtinToolsH)
@@ -384,7 +404,7 @@ func runGateway() {
 
 	// Workspace file serving endpoint — serves files by absolute path, auth-token protected.
 	// Supports media from any agent workspace (each agent has its own workspace from DB).
-	server.SetFilesHandler(httpapi.NewFilesHandler(cfg.Gateway.Token))
+	server.SetFilesHandler(httpapi.NewFilesHandler(cfg.Gateway.Token, workspace, dataDir))
 
 	// Storage file management — browse/delete files under the resolved workspace directory.
 	// Uses GOCLAW_WORKSPACE (or default ~/.goclaw/workspace) so it works correctly
@@ -403,12 +423,20 @@ func runGateway() {
 	if pgStores.BuiltinTools != nil {
 		seedBuiltinTools(context.Background(), pgStores.BuiltinTools)
 		migrateBuiltinToolSettings(context.Background(), pgStores.BuiltinTools)
+		backfillWebFetchSettings(context.Background(), pgStores.BuiltinTools)
 		applyBuiltinToolDisables(context.Background(), pgStores.BuiltinTools, toolsReg)
 	}
 
 	// Register all RPC methods
 	server.SetLogTee(logTee)
-	pairingMethods, heartbeatMethods := registerAllMethods(server, agentRouter, pgStores.Sessions, pgStores.Cron, pgStores.Pairing, cfg, cfgPath, workspace, dataDir, msgBus, execApprovalMgr, pgStores.Agents, pgStores.Skills, pgStores.ConfigSecrets, pgStores.Teams, contextFileInterceptor, logTee, pgStores.Heartbeats, pgStores.ConfigPermissions)
+	pairingMethods, heartbeatMethods, chatMethods := registerAllMethods(server, agentRouter, pgStores.Sessions, pgStores.Cron, pgStores.Pairing, cfg, cfgPath, workspace, dataDir, msgBus, execApprovalMgr, pgStores.Agents, pgStores.Skills, pgStores.ConfigSecrets, pgStores.Teams, contextFileInterceptor, logTee, pgStores.Heartbeats, pgStores.ConfigPermissions)
+
+	// Wire post-turn processor for team task dispatch (WS chat.send + HTTP API paths).
+	if postTurn != nil {
+		chatMethods.SetPostTurnProcessor(postTurn)
+		server.SetPostTurnProcessor(postTurn) // HTTP: /v1/chat/completions, /v1/responses
+		wakeH.SetPostTurnProcessor(postTurn)  // HTTP: /v1/agents/{id}/wake
+	}
 
 	// Wire pairing event broadcasts to all WS clients.
 	pairingMethods.SetBroadcaster(server.BroadcastEvent)
@@ -429,6 +457,12 @@ func runGateway() {
 			cs.SetChannelSender(channelMgr.SendToChannel)
 		}
 	}
+	// Wire group member lister on list_group_members tool
+	if t, ok := toolsReg.Get("list_group_members"); ok {
+		if gl, ok := t.(tools.GroupMemberListerAware); ok {
+			gl.SetGroupMemberLister(channelMgr.ListGroupMembers)
+		}
+	}
 
 	// Load channel instances from DB.
 	var instanceLoader *channels.InstanceLoader
@@ -437,13 +471,13 @@ func runGateway() {
 		instanceLoader.SetProviderRegistry(providerRegistry)
 		instanceLoader.SetPendingCompactionConfig(cfg.Channels.PendingCompaction)
 		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.PendingMessages))
-		instanceLoader.RegisterFactory(channels.TypeDiscord, discord.FactoryWithPendingStore(pgStores.PendingMessages))
+		instanceLoader.RegisterFactory(channels.TypeDiscord, discord.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeFeishu, feishu.FactoryWithPendingStore(pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeZaloOA, zalo.Factory)
 		instanceLoader.RegisterFactory(channels.TypeZaloPersonal, zalopersonal.FactoryWithPendingStore(pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeWhatsApp, whatsapp.Factory)
 		instanceLoader.RegisterFactory(channels.TypeSlack, slackchannel.FactoryWithPendingStore(pgStores.PendingMessages))
-		if err := instanceLoader.LoadAll(context.Background()); err != nil {
+		if err := instanceLoader.LoadAll(store.WithCrossTenant(context.Background())); err != nil {
 			slog.Error("failed to load channel instances from DB", "error", err)
 		}
 	}
@@ -478,7 +512,8 @@ func runGateway() {
 		})
 		go func() {
 			for payload := range auditCh {
-				if err := pgStores.Activity.Log(context.Background(), &store.ActivityLog{
+				auditCtx := store.WithTenantID(context.Background(), payload.TenantID)
+				if err := pgStores.Activity.Log(auditCtx, &store.ActivityLog{
 					ActorType:  payload.ActorType,
 					ActorID:    payload.ActorID,
 					Action:     payload.Action,
@@ -567,6 +602,14 @@ func runGateway() {
 				notifyType = "progress"
 			case protocol.EventTeamTaskCompleted:
 				notifyType = "completed"
+			case protocol.EventTeamTaskCommented:
+				notifyType = "commented"
+			case protocol.EventTeamTaskCreated:
+				// Only notify for human-created tasks (agent-created go through dispatch).
+				if payload.ActorType != "human" {
+					return
+				}
+				notifyType = "new_task"
 			default:
 				return
 			}
@@ -575,7 +618,7 @@ func runGateway() {
 			if err != nil {
 				return
 			}
-			team, err := notifyTeamStore.GetTeam(context.Background(), teamUUID)
+			team, err := notifyTeamStore.GetTeam(store.WithCrossTenant(context.Background()), teamUUID)
 			if err != nil || team == nil {
 				return
 			}
@@ -599,6 +642,14 @@ func runGateway() {
 				if !cfg.Completed {
 					return
 				}
+			case "commented":
+				if !cfg.Commented {
+					return
+				}
+			case "new_task":
+				if !cfg.NewTask {
+					return
+				}
 			}
 
 			// Skip internal channels.
@@ -609,7 +660,7 @@ func runGateway() {
 			// Resolve lead agent key (needed for leader mode routing + completed-by-leader skip).
 			var leadAgentKey string
 			if notifyAgentStore != nil {
-				if la, err := notifyAgentStore.GetByID(context.Background(), team.LeadAgentID); err == nil {
+				if la, err := notifyAgentStore.GetByID(store.WithCrossTenant(context.Background()), team.LeadAgentID); err == nil {
 					leadAgentKey = la.AgentKey
 				}
 			}
@@ -649,6 +700,14 @@ func runGateway() {
 					reason = reason[:200] + "..."
 				}
 				content = fmt.Sprintf("❌ Task #%d \"%s\" failed: %s", payload.TaskNumber, payload.Subject, reason)
+			case protocol.EventTeamTaskCommented:
+				actor := payload.ActorID
+				if actor == "" {
+					actor = "unknown"
+				}
+				content = fmt.Sprintf("💬 Task #%d \"%s\": comment from %s", payload.TaskNumber, payload.Subject, actor)
+			case protocol.EventTeamTaskCreated:
+				content = fmt.Sprintf("📋 New task #%d \"%s\" created", payload.TaskNumber, payload.Subject)
 			}
 
 			// In leader mode, require resolved agent key for routing.
@@ -740,10 +799,11 @@ func runGateway() {
 	// Uses calibrated token estimation (actual prompt tokens from last LLM call)
 	// and the agent's real context window (cached on session by the Loop).
 	sched.SetTokenEstimateFunc(func(sessionKey string) (int, int) {
-		history := pgStores.Sessions.GetHistory(sessionKey)
-		lastPT, lastMC := pgStores.Sessions.GetLastPromptTokens(sessionKey)
+		bctx := context.Background()
+		history := pgStores.Sessions.GetHistory(bctx, sessionKey)
+		lastPT, lastMC := pgStores.Sessions.GetLastPromptTokens(bctx, sessionKey)
 		tokens := agent.EstimateTokensWithCalibration(history, lastPT, lastMC)
-		cw := pgStores.Sessions.GetContextWindow(sessionKey)
+		cw := pgStores.Sessions.GetContextWindow(bctx, sessionKey)
 		if cw <= 0 {
 			cw = config.DefaultContextWindow
 		}
@@ -815,6 +875,23 @@ func runGateway() {
 	// API key management RPC
 	if pgStores.APIKeys != nil {
 		methods.NewAPIKeysMethods(pgStores.APIKeys).Register(server.Router())
+	}
+
+	// Tenant management RPC + HTTP
+	if pgStores.Tenants != nil {
+		methods.NewTenantsMethods(pgStores.Tenants, msgBus, workspace).Register(server.Router())
+		server.SetTenantsHandler(httpapi.NewTenantsHandler(pgStores.Tenants, cfg.Gateway.Token, msgBus, workspace))
+		server.Router().SetTenantStore(pgStores.Tenants)
+		// Permission cache for tenant membership checks (tenant role, agent access, etc.)
+		permCache := cache.NewPermissionCache()
+		msgBus.Subscribe("permission-cache", func(e bus.Event) {
+			if p, ok := e.Payload.(bus.CacheInvalidatePayload); ok {
+				permCache.HandleInvalidation(p)
+			}
+		})
+		server.Router().SetPermissionCache(permCache)
+		httpapi.InitTenantStore(pgStores.Tenants, msgBus)
+		httpapi.InitOwnerIDs(cfg.Gateway.OwnerIDs)
 	}
 
 	// Reload quota config on config changes via pub/sub.

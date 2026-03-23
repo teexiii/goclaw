@@ -74,24 +74,58 @@ api() {
 }
 
 # ─────────────────────────────────────────────
-# Helper: WebSocket RPC call (for teams)
+# Helper: WebSocket RPC call
+#   Used for: agents.files.set, teams.create,
+#   teams.members.add — endpoints only on WS.
 # ─────────────────────────────────────────────
+WS_CHECKED=""
+ws_check() {
+  if [[ -n "$WS_CHECKED" ]]; then return "$WS_CHECKED"; fi
+  if command -v websocat &>/dev/null; then
+    WS_CHECKED=0
+  else
+    err "websocat not found. Install:"
+    err "  brew install websocat  OR  cargo install websocat  OR  apt install websocat"
+    WS_CHECKED=1
+  fi
+  return "$WS_CHECKED"
+}
+
 ws_rpc() {
   local method="$1" params="$2"
+  ws_check || return 1
+
   local connect_frame="{\"type\":\"req\",\"id\":\"0\",\"method\":\"connect\",\"params\":{\"token\":\"$TOKEN\",\"userID\":\"$USER_ID\",\"version\":3}}"
   local req_frame="{\"type\":\"req\",\"id\":\"1\",\"method\":\"$method\",\"params\":$params}"
-
-  if ! command -v websocat &>/dev/null; then
-    err "websocat not found. Install: brew install websocat  OR  cargo install websocat"
-    err "Skipping WebSocket RPC call: $method"
-    return 1
-  fi
 
   local resp
   resp=$(printf '%s\n%s\n' "$connect_frame" "$req_frame" | \
     websocat -n "$WS_URL" 2>/dev/null | \
     tail -1)
   echo "$resp"
+}
+
+# Helper: set agent context file (SOUL.md, AGENTS.md, etc.) via WS RPC
+set_agent_file() {
+  local agent_key="$1" file_name="$2" content="$3"
+  # Escape content for JSON: replace \ → \\, " → \", newlines → \n
+  local escaped
+  escaped=$(printf '%s' "$content" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null \
+    || printf '%s' "$content" | jq -Rs '.' 2>/dev/null \
+    || { err "Need python3 or jq to escape file content"; return 1; })
+
+  local params="{\"agentId\":\"$agent_key\",\"name\":\"$file_name\",\"content\":$escaped}"
+  local resp
+  resp=$(ws_rpc "agents.files.set" "$params" 2>/dev/null) || {
+    warn "Failed to set $file_name for $agent_key (websocat unavailable)"
+    return 1
+  }
+  if echo "$resp" | grep -q '"ok":true'; then
+    return 0
+  else
+    warn "agents.files.set $file_name for $agent_key: $resp"
+    return 1
+  fi
 }
 
 # ═══════════════════════════════════════════════
@@ -200,11 +234,8 @@ echo " Step 2: Setting SOUL.md (agent personalities)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # --- SOUL.md: Translation Manager ---
-if [[ -n "$MANAGER_ID" && "$MANAGER_ID" != "unknown" ]]; then
-  log "Setting SOUL.md for Translation Manager..."
-  api PUT "/v1/agents/${MANAGER_ID}/instances/default/files/SOUL.md" \
-    -H "Content-Type: text/plain" \
-    -d "$(cat <<'SOUL'
+log "Setting SOUL.md for Translation Manager..."
+set_agent_file "translation-manager" "SOUL.md" "$(cat <<'SOUL'
 # Translation Manager
 
 Bạn là project manager chuyên quản lý pipeline dịch thuật.
@@ -232,15 +263,11 @@ Bạn là project manager chuyên quản lý pipeline dịch thuật.
 - Theo dõi progress, không để task stale
 - Gửi file dịch xong cho user, kèm review score
 SOUL
-)" > /dev/null
-fi
+)" || warn "Skipped (websocat needed)"
 
 # --- SOUL.md: Translator ---
-if [[ -n "$TRANSLATOR_ID" && "$TRANSLATOR_ID" != "unknown" ]]; then
-  log "Setting SOUL.md for Translator..."
-  api PUT "/v1/agents/${TRANSLATOR_ID}/instances/default/files/SOUL.md" \
-    -H "Content-Type: text/plain" \
-    -d "$(cat <<'SOUL'
+log "Setting SOUL.md for Translator..."
+set_agent_file "translator" "SOUL.md" "$(cat <<'SOUL'
 # Translator
 
 Bạn là dịch giả chuyên nghiệp đa ngôn ngữ.
@@ -266,15 +293,11 @@ Bạn là dịch giả chuyên nghiệp đa ngôn ngữ.
 - Đoạn ambiguous: thêm <!-- translator-note: ... --> trong output
 - Tone matching: formal → formal, casual → casual
 SOUL
-)" > /dev/null
-fi
+)" || warn "Skipped (websocat needed)"
 
 # --- SOUL.md: Reviewer ---
-if [[ -n "$REVIEWER_ID" && "$REVIEWER_ID" != "unknown" ]]; then
-  log "Setting SOUL.md for Translation Reviewer..."
-  api PUT "/v1/agents/${REVIEWER_ID}/instances/default/files/SOUL.md" \
-    -H "Content-Type: text/plain" \
-    -d "$(cat <<'SOUL'
+log "Setting SOUL.md for Translation Reviewer..."
+set_agent_file "translation-reviewer" "SOUL.md" "$(cat <<'SOUL'
 # Translation Reviewer
 
 Bạn là biên tập viên dịch thuật chuyên review chất lượng bản dịch.
@@ -310,15 +333,11 @@ Bạn là biên tập viên dịch thuật chuyên review chất lượng bản 
 - Lỗi critical (sai nghĩa, mất đoạn) → phải sửa
 - Lỗi minor (style) → ghi note, không sửa
 SOUL
-)" > /dev/null
-fi
+)" || warn "Skipped (websocat needed)"
 
 # --- AGENTS.md for Manager ---
-if [[ -n "$MANAGER_ID" && "$MANAGER_ID" != "unknown" ]]; then
-  log "Setting AGENTS.md for Translation Manager..."
-  api PUT "/v1/agents/${MANAGER_ID}/instances/default/files/AGENTS.md" \
-    -H "Content-Type: text/plain" \
-    -d "$(cat <<'AGENTS'
+log "Setting AGENTS.md for Translation Manager..."
+set_agent_file "translation-manager" "AGENTS.md" "$(cat <<'AGENTS'
 # Team Members
 
 ## translator
@@ -334,8 +353,7 @@ if [[ -n "$MANAGER_ID" && "$MANAGER_ID" != "unknown" ]]; then
 - Giao việc: `team_tasks(action="create", subject="Review ...", assignee="translation-reviewer")`
 - Output: sửa file dịch trực tiếp + review report trong `review/`
 AGENTS
-)" > /dev/null
-fi
+)" || warn "Skipped (websocat needed)"
 
 # ═══════════════════════════════════════════════
 #  STEP 3: Create and upload Skills (ZIP)
@@ -685,15 +703,15 @@ grant_skill() {
 }
 
 # Grant all 4 skills to all 3 agents
-for SKILL_ID_VAR in SKILL1_ID SKILL2_ID SKILL3_ID SKILL4_ID; do
-  SKILL_ID="${!SKILL_ID_VAR}"
-  SKILL_NAMES=("dich-van-ban" "dich-ui" "glossary-manager" "review-ban-dich")
-  IDX=$((${SKILL_ID_VAR: -1} - 1))  # extract 1,2,3,4 from var name
-  SKILL_NAME="${SKILL_NAMES[$IDX]}"
+SKILL_IDS=("$SKILL1_ID" "$SKILL2_ID" "$SKILL3_ID" "$SKILL4_ID")
+SKILL_NAMES=("dich-van-ban" "dich-ui" "glossary-manager" "review-ban-dich")
+AGENT_IDS=("$MANAGER_ID" "$TRANSLATOR_ID" "$REVIEWER_ID")
+AGENT_NAMES=("manager" "translator" "reviewer")
 
-  grant_skill "$SKILL_ID" "$MANAGER_ID" "$SKILL_NAME" "manager"
-  grant_skill "$SKILL_ID" "$TRANSLATOR_ID" "$SKILL_NAME" "translator"
-  grant_skill "$SKILL_ID" "$REVIEWER_ID" "$SKILL_NAME" "reviewer"
+for i in 0 1 2 3; do
+  for j in 0 1 2; do
+    grant_skill "${SKILL_IDS[$i]}" "${AGENT_IDS[$j]}" "${SKILL_NAMES[$i]}" "${AGENT_NAMES[$j]}"
+  done
 done
 
 # ═══════════════════════════════════════════════

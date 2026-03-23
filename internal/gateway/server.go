@@ -45,6 +45,7 @@ type Server struct {
 	mcpHandler         *httpapi.MCPHandler         // MCP server management API
 	channelInstancesHandler *httpapi.ChannelInstancesHandler // channel instance CRUD API
 	providersHandler        *httpapi.ProvidersHandler        // provider CRUD API
+	teamsHandler            *httpapi.TeamsHandler             // team CRUD + member management API
 	teamEventsHandler       *httpapi.TeamEventsHandler       // team event history API
 	teamAttachmentsHandler  *httpapi.TeamAttachmentsHandler  // team attachment download API
 	builtinToolsHandler     *httpapi.BuiltinToolsHandler     // builtin tool management API
@@ -227,6 +228,11 @@ func (s *Server) BuildMux() *http.ServeMux {
 		s.providersHandler.RegisterRoutes(mux)
 	}
 
+
+	// Team CRUD + member management API
+	if s.teamsHandler != nil {
+		s.teamsHandler.RegisterRoutes(mux)
+	}
 
 	// Team event history API
 	if s.teamEventsHandler != nil {
@@ -495,6 +501,9 @@ func (s *Server) SetChannelInstancesHandler(h *httpapi.ChannelInstancesHandler) 
 
 // SetProvidersHandler sets the provider CRUD handler.
 func (s *Server) SetProvidersHandler(h *httpapi.ProvidersHandler) { s.providersHandler = h }
+
+// SetTeamsHandler sets the team CRUD + member management handler.
+func (s *Server) SetTeamsHandler(h *httpapi.TeamsHandler) { s.teamsHandler = h }
 
 // SetTeamEventsHandler sets the team event history handler.
 func (s *Server) SetTeamEventsHandler(h *httpapi.TeamEventsHandler) { s.teamEventsHandler = h }

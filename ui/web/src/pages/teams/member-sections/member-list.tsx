@@ -1,6 +1,7 @@
 import { Users, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router";
 import type { TeamMemberData } from "@/types/team";
 import { roleBadgeVariant } from "./member-utils";
 
@@ -35,9 +36,9 @@ export function MemberList({ members, onRemove }: MemberListProps) {
           className="grid grid-cols-[1fr_1fr_80px_40px] items-center gap-2 border-b px-4 py-3 last:border-0"
         >
           <div className="min-w-0">
-            <span className="truncate text-sm font-medium">
+            <Link to={`/agents/${member.agent_id}`} className="truncate text-sm font-medium hover:underline">
               {member.display_name || member.agent_key || member.agent_id.slice(0, 8)}
-            </span>
+            </Link>
             {member.display_name && member.agent_key && (
               <p className="truncate text-xs text-muted-foreground">
                 {member.agent_key}

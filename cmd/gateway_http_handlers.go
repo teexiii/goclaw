@@ -68,7 +68,6 @@ func wireHTTP(stores *store.Stores, token, defaultWorkspace, dataDir, bundledSki
 	if stores != nil && stores.Teams != nil && stores.Agents != nil {
 		teamsH = httpapi.NewTeamsHandler(stores.Teams, stores.Agents, stores.AgentLinks, token, msgBus)
 	}
-
 	if stores != nil && stores.Teams != nil {
 		teamEventsH = httpapi.NewTeamEventsHandler(stores.Teams, token)
 	}

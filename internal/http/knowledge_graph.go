@@ -13,12 +13,11 @@ import (
 type KnowledgeGraphHandler struct {
 	store       store.KnowledgeGraphStore
 	providerReg *providers.Registry
-	token       string
 }
 
 // NewKnowledgeGraphHandler creates a handler for KG management endpoints.
-func NewKnowledgeGraphHandler(s store.KnowledgeGraphStore, providerReg *providers.Registry, token string) *KnowledgeGraphHandler {
-	return &KnowledgeGraphHandler{store: s, providerReg: providerReg, token: token}
+func NewKnowledgeGraphHandler(s store.KnowledgeGraphStore, providerReg *providers.Registry) *KnowledgeGraphHandler {
+	return &KnowledgeGraphHandler{store: s, providerReg: providerReg}
 }
 
 // NewExtractor creates an Extractor from the given provider name and model.
@@ -43,8 +42,12 @@ func (h *KnowledgeGraphHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agents/{agentID}/kg/extract", h.auth(h.handleExtract))
 	mux.HandleFunc("GET /v1/agents/{agentID}/kg/stats", h.auth(h.handleStats))
 	mux.HandleFunc("GET /v1/agents/{agentID}/kg/graph", h.auth(h.handleGraph))
+	mux.HandleFunc("POST /v1/agents/{agentID}/kg/dedup/scan", h.auth(h.handleScanDuplicates))
+	mux.HandleFunc("GET /v1/agents/{agentID}/kg/dedup", h.auth(h.handleListDedupCandidates))
+	mux.HandleFunc("POST /v1/agents/{agentID}/kg/merge", h.auth(h.handleMergeEntities))
+	mux.HandleFunc("POST /v1/agents/{agentID}/kg/dedup/dismiss", h.auth(h.handleDismissCandidate))
 }
 
 func (h *KnowledgeGraphHandler) auth(next http.HandlerFunc) http.HandlerFunc {
-	return requireAuth(h.token, "", next)
+	return requireAuth("", next)
 }

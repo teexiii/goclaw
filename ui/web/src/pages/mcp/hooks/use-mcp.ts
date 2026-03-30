@@ -109,6 +109,19 @@ export function useMCP() {
     [http],
   );
 
+  const reconnectServer = useCallback(
+    async (id: string) => {
+      try {
+        await http.post(`/v1/mcp/servers/${id}/reconnect`, {});
+        toast.success(i18next.t("mcp:toast.reconnected"));
+      } catch (err) {
+        toast.error(i18next.t("mcp:toast.failedReconnect"), err instanceof Error ? err.message : "");
+        throw err;
+      }
+    },
+    [http],
+  );
+
   const listServerTools = useCallback(
     async (serverId: string) => {
       const res = await http.get<{ tools: MCPToolInfo[] }>(`/v1/mcp/servers/${serverId}/tools`);
@@ -118,22 +131,25 @@ export function useMCP() {
   );
 
   const getUserCredentials = useCallback(
-    async (serverId: string) => {
-      return http.get<MCPUserCredentialStatus>(`/v1/mcp/servers/${serverId}/user-credentials`);
+    async (serverId: string, userId?: string) => {
+      const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+      return http.get<MCPUserCredentialStatus>(`/v1/mcp/servers/${serverId}/user-credentials${qs}`);
     },
     [http],
   );
 
   const setUserCredentials = useCallback(
-    async (serverId: string, creds: MCPUserCredentialInput) => {
-      await http.put(`/v1/mcp/servers/${serverId}/user-credentials`, creds);
+    async (serverId: string, creds: MCPUserCredentialInput, userId?: string) => {
+      const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+      await http.put(`/v1/mcp/servers/${serverId}/user-credentials${qs}`, creds);
     },
     [http],
   );
 
   const deleteUserCredentials = useCallback(
-    async (serverId: string) => {
-      await http.delete(`/v1/mcp/servers/${serverId}/user-credentials`);
+    async (serverId: string, userId?: string) => {
+      const qs = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+      await http.delete(`/v1/mcp/servers/${serverId}/user-credentials${qs}`);
     },
     [http],
   );
@@ -150,6 +166,7 @@ export function useMCP() {
     revokeAgent,
     listGrantsByAgent,
     testConnection,
+    reconnectServer,
     listServerTools,
     getUserCredentials,
     setUserCredentials,

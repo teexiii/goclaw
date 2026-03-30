@@ -21,6 +21,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
@@ -89,10 +90,12 @@ func wireExtras(
 		}
 	}
 
-	// 2. User seeding callback: seeds per-user context files on first chat
-	var ensureUserFiles agent.EnsureUserFilesFunc
+	// 2. Per-user profile + context file seeding callbacks
+	var ensureUserProfile agent.EnsureUserProfileFunc
+	var seedUserFiles agent.SeedUserFilesFunc
 	if stores.Agents != nil {
-		ensureUserFiles = buildEnsureUserFiles(stores.Agents, stores.ConfigPermissions)
+		ensureUserProfile = buildEnsureUserProfile(stores.Agents, stores.ConfigPermissions)
+		seedUserFiles = buildSeedUserFiles(stores.Agents)
 	}
 
 	// 3. Context file loader callback: loads per-user context files dynamically
@@ -137,9 +140,11 @@ func wireExtras(
 		SkillAccessStore:       skillAccessStore,
 		HasMemory:              hasMemory,
 		TraceCollector:         traceCollector,
-		EnsureUserFiles:        ensureUserFiles,
+		EnsureUserProfile:      ensureUserProfile,
+		SeedUserFiles:          seedUserFiles,
 		ContextFileLoader:      contextFileLoader,
 		BootstrapCleanup:       buildBootstrapCleanup(stores.Agents),
+		CacheInvalidate:        buildCacheInvalidate(contextFileInterceptor),
 		InjectionAction:        injectionAction,
 		MaxMessageChars:        appCfg.Gateway.MaxMessageChars,
 		CompactionCfg:          appCfg.Agents.Defaults.Compaction,
@@ -166,9 +171,33 @@ func wireExtras(
 		OnEvent: func(event agent.AgentEvent) {
 			// Sign /v1/files/ and /v1/media/ URLs in content before delivery.
 			// Sessions store clean paths; signing happens only at delivery time.
-			if m, ok := event.Payload.(map[string]string); ok {
+			secret := httpapi.FileSigningKey()
+			switch m := event.Payload.(type) {
+			case map[string]string:
 				if c, has := m["content"]; has && strings.Contains(c, "/v1/") {
-					m["content"] = httpapi.SignFileURLs(c, httpapi.FileSigningKey())
+					m["content"] = httpapi.SignFileURLs(c, secret)
+				}
+			case map[string]any:
+				// Sign /v1/ URLs in content text (run.completed payload is map[string]any).
+				if c, ok := m["content"].(string); ok && strings.Contains(c, "/v1/") {
+					m["content"] = httpapi.SignFileURLs(c, secret)
+				}
+				// Convert media local paths → signed /v1/files/{full_path}?ft=hash
+				if rawMedia, ok := m["media"].([]agent.MediaResult); ok {
+					// Clone slice — the original is shared with RunResult.Media;
+					// mutating in-place corrupts paths for downstream consumers
+					// (announce queue, outbound channels) that expect local paths.
+					signed := make([]agent.MediaResult, len(rawMedia))
+					for i, mr := range rawMedia {
+						signed[i] = mr
+						// Use full path so backend resolves directly via os.Stat,
+						// no findInWorkspace fallback needed.
+						urlPath := strings.TrimPrefix(filepath.Clean(mr.Path), "/")
+						url := "/v1/files/" + urlPath
+						ft := httpapi.SignFileToken(url, secret, httpapi.FileTokenTTL)
+						signed[i].Path = url + "?ft=" + ft
+					}
+					m["media"] = signed
 				}
 			}
 			msgBus.Broadcast(bus.Event{
@@ -256,7 +285,7 @@ func wireExtras(
 				ms.SetMemoryStore(stores.Memory)
 			}
 		}
-		slog.Info("memory layering enabled (Postgres)")
+		slog.Info("memory layering enabled")
 	}
 
 	// Wire knowledge graph store on KG tool + hint in memory_search results
@@ -414,7 +443,11 @@ func wireExtras(
 	if stores.Teams != nil && stores.Agents != nil {
 		teamMgr := tools.NewTeamToolManager(stores.Teams, stores.Agents, msgBus, workspace)
 		postTurn = teamMgr
-		toolsReg.Register(tools.NewTeamTasksTool(teamMgr))
+		var teamPolicy tools.TeamActionPolicy = tools.FullTeamPolicy{}
+		if !edition.Current().TeamFullMode {
+			teamPolicy = tools.LiteTeamPolicy{}
+		}
+		toolsReg.Register(tools.NewTeamTasksTool(teamMgr, teamPolicy))
 		// Wire workspace interceptor into write_file so team workspace validation
 		// and event broadcasting happen transparently via existing file tools.
 		wsInterceptor := tools.NewWorkspaceInterceptor(teamMgr)
@@ -479,7 +512,8 @@ func wireExtras(
 			return
 		}
 		// Re-register from DB if provider still exists and is ACP type
-		p, err := stores.Providers.GetProviderByName(context.Background(), payload.Key)
+		provCtx := store.WithTenantID(context.Background(), event.TenantID)
+		p, err := stores.Providers.GetProviderByName(provCtx, payload.Key)
 		if err != nil {
 			// Provider was deleted or not found — already unregistered by handler
 			return
@@ -549,11 +583,22 @@ func buildKGExtractFunc(kgStore store.KnowledgeGraphStore, bts store.BuiltinTool
 			result.Relations[i].AgentID = agentID
 			result.Relations[i].UserID = userID
 		}
-		if err := kgStore.IngestExtraction(ctx, agentID, userID, result.Entities, result.Relations); err != nil {
+		entityIDs, err := kgStore.IngestExtraction(ctx, agentID, userID, result.Entities, result.Relations)
+		if err != nil {
 			slog.Warn("kg extract: ingest failed", "agent", agentID, "error", err)
 			return
 		}
 		slog.Info("kg extract: ingested from memory write", "agent", agentID, "entities", len(result.Entities), "relations", len(result.Relations))
+
+		// Run inline dedup on newly upserted entities (best-effort, non-blocking)
+		if len(entityIDs) > 0 {
+			merged, flagged, dedupErr := kgStore.DedupAfterExtraction(ctx, agentID, userID, entityIDs)
+			if dedupErr != nil {
+				slog.Warn("kg extract: dedup failed", "agent", agentID, "error", dedupErr)
+			} else if merged > 0 || flagged > 0 {
+				slog.Info("kg extract: dedup completed", "agent", agentID, "auto_merged", merged, "candidates_flagged", flagged)
+			}
+		}
 	}
 }
 

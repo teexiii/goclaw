@@ -291,8 +291,10 @@ func (l *Loop) enrichVideoIDs(messages []providers.Message, refs []providers.Med
 }
 
 // enrichImageIDs updates the last user message to embed persisted media IDs
-// in <media:image> tags so the LLM knows images were received and stored.
-// Without this, the LLM sees plain <media:image> and cannot confirm image availability.
+// and file paths in <media:image> tags so the LLM knows images were received
+// and stored. The path attribute allows tools called via MCP bridge (e.g.
+// claude-cli) to access images via read_image(path=...) even though the
+// bridge context does not carry WithMediaImages.
 // Iterates refs in reverse order so that when multiple images are present,
 // each ref maps to the correct positional tag (last ref → last tag, etc.).
 func (l *Loop) enrichImageIDs(messages []providers.Message, refs []providers.MediaRef) {
@@ -318,15 +320,81 @@ func (l *Loop) enrichImageIDs(messages []providers.Message, refs []providers.Med
 			continue
 		}
 		idAttr := fmt.Sprintf(" id=%q", ref.ID)
+		pathAttr := ""
+		if ref.Path != "" {
+			pathAttr = fmt.Sprintf(" path=%q", ref.Path)
+		}
 
-		// Replace the LAST bare <media:image> with <media:image id="uuid">
+		// Replace the LAST bare <media:image> with <media:image id="uuid" path="...">
 		bare := "<media:image>"
 		if idx := strings.LastIndex(content, bare); idx >= 0 {
-			content = content[:idx] + "<media:image" + idAttr + ">" + content[idx+len(bare):]
+			content = content[:idx] + "<media:image" + idAttr + pathAttr + ">" + content[idx+len(bare):]
 			continue
 		}
 	}
 	messages[lastIdx].Content = content
+}
+
+// enrichImagePaths updates ALL user messages to include persisted file paths
+// in <media:image> tags. This enables the LLM to call read_image(path=...)
+// to analyze images without inline base64 (saving context tokens).
+// Unlike enrichImageIDs (last user message only), this enriches ALL messages
+// so historical images from prior turns are also accessible via file path.
+func (l *Loop) enrichImagePaths(messages []providers.Message) {
+	if l.mediaStore == nil {
+		return
+	}
+	for i := range messages {
+		if messages[i].Role != "user" || len(messages[i].MediaRefs) == 0 {
+			continue
+		}
+		content := messages[i].Content
+		changed := false
+		for _, ref := range messages[i].MediaRefs {
+			if ref.Kind != "image" {
+				continue
+			}
+			p := ref.Path
+			if p == "" {
+				var err error
+				p, err = l.mediaStore.LoadPath(ref.ID)
+				if err != nil {
+					continue
+				}
+			}
+			if p == "" {
+				continue
+			}
+			pathAttr := fmt.Sprintf(" path=%q", p)
+
+			// Skip if path already present in this tag.
+			tagWithID := fmt.Sprintf(`<media:image id=%q`, ref.ID)
+			if idx := strings.Index(content, tagWithID); idx >= 0 {
+				closeIdx := strings.Index(content[idx:], ">")
+				if closeIdx >= 0 {
+					tag := content[idx : idx+closeIdx]
+					if strings.Contains(tag, "path=") {
+						continue // already has path
+					}
+					// Inject path before closing >
+					content = content[:idx+closeIdx] + pathAttr + content[idx+closeIdx:]
+					changed = true
+				}
+				continue
+			}
+
+			// Bare <media:image> without id — replace LAST occurrence.
+			bare := "<media:image>"
+			if idx := strings.LastIndex(content, bare); idx >= 0 {
+				replacement := fmt.Sprintf(`<media:image id=%q%s>`, ref.ID, pathAttr)
+				content = content[:idx] + replacement + content[idx+len(bare):]
+				changed = true
+			}
+		}
+		if changed {
+			messages[i].Content = content
+		}
+	}
 }
 
 // mediaKindFromMime returns the media kind ("image", "video", "audio", "document")

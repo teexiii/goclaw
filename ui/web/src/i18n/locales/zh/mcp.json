@@ -18,6 +18,7 @@
   },
   "viewTools": "查看工具",
   "manageGrants": "管理授权",
+  "reconnect": "重新连接",
   "delete": {
     "title": "删除 MCP 服务器",
     "description": "确定要删除「{{name}}」吗？这将同时移除所有相关授权。",
@@ -98,11 +99,16 @@
     "deleted": "MCP 服务器已删除",
     "failedCreate": "创建 MCP 服务器失败",
     "failedUpdate": "更新 MCP 服务器失败",
-    "failedDelete": "删除 MCP 服务器失败"
+    "failedDelete": "删除 MCP 服务器失败",
+    "reconnected": "MCP 服务器连接已重置",
+    "failedReconnect": "重新连接 MCP 服务器失败"
   },
   "userCredentials": {
     "title": "我的凭证",
     "description": "为此 MCP 服务器设置您的个人凭证，仅对您的账户生效。",
+    "titleAdmin": "用户凭证",
+    "descriptionAdmin": "为特定用户设置此 MCP 服务器的凭证。这些凭证仅覆盖所选用户的服务器默认值。",
+    "selectUser": "选择用户",
     "apiKey": "API 密钥",
     "apiKeyPlaceholder": "留空以保持当前值",
     "headers": "请求头",

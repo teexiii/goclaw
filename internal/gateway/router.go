@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,8 +24,8 @@ type MethodHandler func(ctx context.Context, client *Client, req *protocol.Reque
 type MethodRouter struct {
 	handlers    map[string]MethodHandler
 	server      *Server
-	tenantStore store.TenantStore       // optional, for enriching connect response
-	permCache   *cache.PermissionCache  // optional, for caching tenant membership checks
+	tenantStore store.TenantStore      // optional, for enriching connect response
+	permCache   *cache.PermissionCache // optional, for caching tenant membership checks
 }
 
 func NewMethodRouter(server *Server) *MethodRouter {
@@ -70,7 +71,7 @@ func (r *MethodRouter) Handle(ctx context.Context, client *Client, req *protocol
 				client.SendResponse(protocol.NewErrorResponse(
 					req.ID,
 					protocol.ErrUnauthorized,
-					i18n.T(locale, i18n.MsgPermissionDenied, req.Method),
+					i18n.T(locale, i18n.MsgPermissionDenied, req.Method+" requires "+string(permissions.MethodRole(req.Method))+" role"),
 				))
 				return
 			}
@@ -78,11 +79,13 @@ func (r *MethodRouter) Handle(ctx context.Context, client *Client, req *protocol
 	}
 
 	// Inject locale + tenant into context.
-	// All connect paths now guarantee client.tenantID is set (cross-tenant defaults to MasterTenantID),
-	// so WithCrossTenant is no longer needed here.
+	// All connect paths guarantee client.tenantID is set (owner defaults to MasterTenantID).
 	ctx = store.WithLocale(ctx, i18n.Normalize(client.locale))
 	if client.TenantID() != uuid.Nil {
 		ctx = store.WithTenantID(ctx, client.TenantID())
+	}
+	if slug := client.TenantSlug(); slug != "" {
+		ctx = store.WithTenantSlug(ctx, slug)
 	}
 
 	slog.Debug("handling method", "method", req.Method, "client", client.id, "req_id", req.ID)
@@ -106,9 +109,9 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 		UserID      string `json:"user_id"`
 		SenderID    string `json:"sender_id"`    // browser pairing: stored sender ID for reconnect
 		Locale      string `json:"locale"`       // user's preferred locale (en, vi, zh)
-		TenantHint string `json:"tenant_hint"`      // optional tenant slug for browser pairing multi-tenant
-		TenantID   string `json:"tenant_id"`        // cross-tenant admin: narrow scope to specific tenant (UUID or slug)
-		TenantScope string `json:"tenant_scope"`    // deprecated: alias for tenant_id (backward compat)
+		TenantHint  string `json:"tenant_hint"`  // optional tenant slug for browser pairing multi-tenant
+		TenantID    string `json:"tenant_id"`    // cross-tenant admin: narrow scope to specific tenant (UUID or slug)
+		TenantScope string `json:"tenant_scope"` // deprecated: alias for tenant_id (backward compat)
 	}
 	if req.Params != nil {
 		json.Unmarshal(req.Params, &params)
@@ -125,21 +128,16 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 		client.authenticated = true
 		client.userID = params.UserID
 
-		// Only owner IDs get cross-tenant (god-mode) access;
-		// other users with the gateway token still get admin role
-		// but are scoped to their tenant memberships.
+		// Owner IDs get RoleOwner; others keep RoleAdmin but are scoped to their tenant.
 		isOwner := isOwnerID(params.UserID, r.server.cfg.Gateway.OwnerIDs)
-		client.crossTenant = isOwner
-
 		if isOwner {
-			// Cross-tenant admin can narrow scope to a specific tenant
+			client.role = permissions.RoleOwner
+			// Owner can narrow scope to a specific tenant via param
 			tenantScope := params.TenantID
 			if tenantScope == "" {
 				tenantScope = params.TenantScope // backward compat
 			}
 			r.applyTenantScope(ctx, client, tenantScope)
-			// Always ensure tenant is set — prevents unscoped operations
-			// that use MasterTenantID fallback inconsistently with scoped sessions.
 			if client.tenantID == uuid.Nil {
 				client.tenantID = store.MasterTenantID
 			}
@@ -147,7 +145,10 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 			// Non-owner with gateway token: resolve tenant via hint or membership
 			hint := params.TenantID
 			if hint == "" {
-				hint = params.TenantScope
+				hint = params.TenantHint
+			}
+			if hint == "" {
+				hint = params.TenantScope // deprecated
 			}
 			tid, errCode := r.resolveTenantHint(ctx, hint, params.UserID)
 			if errCode != "" {
@@ -183,8 +184,8 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 				client.userID = params.UserID
 			}
 			if keyData.TenantID == uuid.Nil {
-				client.crossTenant = true
-				// Cross-tenant API key can narrow scope to a specific tenant
+				// System-level API keys keep their scope-derived role and may
+				// optionally narrow to a tenant without gaining owner privileges.
 				apiKeyScope := params.TenantID
 				if apiKeyScope == "" {
 					apiKeyScope = params.TenantScope // backward compat
@@ -196,7 +197,6 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 				slog.Debug("security.ws_connect_resolved",
 					"client", client.id,
 					"role", string(client.role),
-					"cross_tenant", client.crossTenant,
 					"tenant_id", client.tenantID.String(),
 				)
 			} else {
@@ -294,11 +294,11 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 
 func (r *MethodRouter) sendConnectResponse(ctx context.Context, client *Client, reqID string) {
 	resp := map[string]any{
-		"protocol":     protocol.ProtocolVersion,
-		"role":         string(client.role),
-		"user_id":      client.userID,
-		"tenant_id":    client.tenantID.String(),
-		"cross_tenant": client.crossTenant,
+		"protocol":  protocol.ProtocolVersion,
+		"role":      string(client.role),
+		"user_id":   client.userID,
+		"tenant_id": client.tenantID.String(),
+		"is_owner":  client.IsOwner(),
 		"server": map[string]any{
 			"name":    "goclaw",
 			"version": r.server.version,
@@ -327,12 +327,7 @@ func isOwnerID(userID string, ownerIDs []string) bool {
 	if len(ownerIDs) == 0 {
 		return userID == "system"
 	}
-	for _, id := range ownerIDs {
-		if id == userID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ownerIDs, userID)
 }
 
 // resolveTenantHint resolves a tenant slug/UUID hint to a UUID with membership validation.
@@ -388,15 +383,13 @@ func (r *MethodRouter) getUserTenantRole(ctx context.Context, tenantID uuid.UUID
 	return role, nil
 }
 
-// applyTenantScope narrows a cross-tenant client's data scope to a specific tenant.
-// Client stays crossTenant=true (retains admin privileges) but tenantID is set
-// so the router injects WithTenantID instead of WithCrossTenant for data filtering.
+// applyTenantScope narrows an owner client's data scope to a specific tenant.
+// Sets client.tenantID so the router injects WithTenantID for data filtering.
 // Accepts both UUID and slug values.
 func (r *MethodRouter) applyTenantScope(ctx context.Context, client *Client, tenantVal string) {
 	if tenantVal == "" || r.tenantStore == nil {
 		return
 	}
-	// Try UUID first, then slug
 	var t *store.TenantData
 	var err error
 	if tid, parseErr := uuid.Parse(tenantVal); parseErr == nil {
@@ -405,11 +398,10 @@ func (r *MethodRouter) applyTenantScope(ctx context.Context, client *Client, ten
 		t, err = r.tenantStore.GetTenantBySlug(ctx, tenantVal)
 	}
 	if err != nil || t == nil {
-		slog.Debug("tenant scope not resolved, keeping unscoped", "value", tenantVal)
+		slog.Debug("tenant scope not resolved, keeping master", "value", tenantVal)
 		return
 	}
 	client.tenantID = t.ID
-	// Keep crossTenant=true so client retains admin role + tenant admin access
 	slog.Info("tenant scope applied", "client", client.id, "tenant", t.Slug, "tenant_id", t.ID)
 }
 

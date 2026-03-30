@@ -66,7 +66,7 @@ func (s *PGCronStore) AddJob(ctx context.Context, name string, schedule store.Cr
 
 	nextRun := computeNextRun(&schedule, now, s.defaultTZ)
 
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO cron_jobs (id, tenant_id, agent_id, user_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
 		 interval_ms, payload, delete_after_run, next_run_at, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
@@ -120,7 +120,7 @@ func (s *PGCronStore) ListJobs(ctx context.Context, includeDisabled bool, agentI
 		args = append(args, userID)
 		argIdx++
 	}
-	clause, targs, tErr := tenantClauseN(ctx, argIdx)
+	clause, targs, _, tErr := scopeClause(ctx, argIdx)
 	if tErr != nil {
 		slog.Warn("cron.ListJobs: tenant context missing, returning empty (fail-closed)", "error", tErr)
 		return nil
@@ -133,7 +133,7 @@ func (s *PGCronStore) ListJobs(ctx context.Context, includeDisabled bool, agentI
 
 	q += " ORDER BY created_at DESC"
 
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil
 	}
@@ -185,25 +185,35 @@ func (s *PGCronStore) EnableJob(ctx context.Context, jobID string, enabled bool)
 		return fmt.Errorf("invalid job ID: %s", jobID)
 	}
 
-	q := "UPDATE cron_jobs SET enabled = $1, updated_at = $2 WHERE id = $3"
-	args := []any{enabled, time.Now(), id}
-
-	if !store.IsCrossTenant(ctx) {
-		tid := store.TenantIDFromContext(ctx)
-		if tid == uuid.Nil {
-			return fmt.Errorf("tenant_id required")
-		}
-		q += fmt.Sprintf(" AND tenant_id = $%d", len(args)+1)
-		args = append(args, tid)
-	}
-
-	res, err := s.db.ExecContext(ctx, q, args...)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("job not found")
+	defer tx.Rollback()
+
+	current, err := s.lockCronJobForMutation(ctx, tx, id, false)
+	if err != nil {
+		return err
 	}
-	s.cacheLoaded = false
+
+	now := time.Now()
+	nextRun, err := store.NextRunForToggle(&current.Schedule, enabled, current.Enabled, current.NextRunAt, now, s.defaultTZ)
+	if err != nil {
+		return err
+	}
+
+	if err := execCronJobUpdateTx(ctx, tx, id, map[string]any{
+		"enabled":     enabled,
+		"next_run_at": nextRun,
+		"updated_at":  now,
+	}); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	s.InvalidateCache()
 	return nil
 }

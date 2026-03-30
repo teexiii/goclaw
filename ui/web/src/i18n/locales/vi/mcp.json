@@ -18,6 +18,7 @@
   },
   "viewTools": "Xem công cụ",
   "manageGrants": "Quản lý quyền",
+  "reconnect": "Kết nối lại",
   "delete": {
     "title": "Xóa MCP Server",
     "description": "Bạn có chắc muốn xóa \"{{name}}\"? Tất cả quyền liên quan cũng sẽ bị xóa.",
@@ -98,11 +99,16 @@
     "deleted": "Đã xóa MCP server",
     "failedCreate": "Không thể tạo MCP server",
     "failedUpdate": "Không thể cập nhật MCP server",
-    "failedDelete": "Không thể xóa MCP server"
+    "failedDelete": "Không thể xóa MCP server",
+    "reconnected": "Đã reset kết nối MCP server",
+    "failedReconnect": "Không thể kết nối lại MCP server"
   },
   "userCredentials": {
     "title": "Thông tin xác thực",
     "description": "Đặt thông tin xác thực cá nhân của bạn cho máy chủ MCP này. Chỉ áp dụng cho tài khoản của bạn.",
+    "titleAdmin": "Thông tin xác thực",
+    "descriptionAdmin": "Đặt thông tin xác thực cho người dùng cụ thể trên máy chủ MCP này. Chúng ghi đè cài đặt mặc định của máy chủ chỉ cho người dùng được chọn.",
+    "selectUser": "Chọn người dùng",
     "apiKey": "API Key",
     "apiKeyPlaceholder": "Để trống để giữ nguyên",
     "headers": "Headers",

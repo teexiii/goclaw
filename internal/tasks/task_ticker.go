@@ -13,14 +13,16 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
 const (
-	defaultRecoveryInterval = 5 * time.Minute
-	defaultStaleThreshold   = 2 * time.Hour
-	followupCooldown        = 5 * time.Minute
-	defaultFollowupInterval = 30 * time.Minute
+	defaultRecoveryInterval    = 5 * time.Minute
+	defaultStaleThreshold      = 2 * time.Hour
+	defaultInReviewThreshold   = 4 * time.Hour
+	followupCooldown           = 5 * time.Minute
+	defaultFollowupInterval    = 30 * time.Minute
 )
 
 // TaskTicker periodically recovers stale tasks and re-dispatches pending work.
@@ -136,7 +138,35 @@ func (t *TaskTicker) recoverAll(forceRecover bool) {
 		t.broadcastStaleEvents(recoverCtx, stale)
 	}
 
-	// Step 4: Prune old cooldown entries to prevent memory leak.
+	// Step 4: Mark in_review tasks stale after 4 hours.
+	inReviewThreshold := time.Now().Add(-defaultInReviewThreshold)
+	staleReview, err := t.teams.MarkInReviewStaleTasks(recoverCtx, inReviewThreshold)
+	if err != nil {
+		slog.Warn("task_ticker: batch mark in_review stale", "error", err)
+	}
+	if len(staleReview) > 0 {
+		slog.Info("task_ticker: marked in_review stale", "count", len(staleReview))
+		t.notifyLeaders(recoverCtx, staleReview, "in review too long (4+ hours) — marked stale",
+			"These tasks have been waiting for approval too long.\n"+
+				"To approve: use team_tasks(action=\"approve\", task_id=\"<task_id>\").\n"+
+				"To reject: use team_tasks(action=\"reject\", task_id=\"<task_id>\", text=\"reason\").\n"+
+				"To retry: use team_tasks(action=\"retry\", task_id=\"<task_id>\").")
+		t.broadcastStaleEvents(recoverCtx, staleReview)
+	}
+
+	// Step 5: Fix orphaned blocked tasks where all blockers are terminal.
+	fixed, err := t.teams.FixOrphanedBlockedTasks(recoverCtx)
+	if err != nil {
+		slog.Warn("task_ticker: fix orphaned blocked tasks", "error", err)
+	}
+	if len(fixed) > 0 {
+		slog.Info("task_ticker: auto-unblocked orphaned tasks", "count", len(fixed))
+		t.notifyLeaders(recoverCtx, fixed, "auto-unblocked (all blockers resolved)",
+			"These blocked tasks were automatically unblocked because all their dependencies completed.\n"+
+				"They are now pending and will be dispatched if assigned.")
+	}
+
+	// Step 6: Prune old cooldown entries to prevent memory leak.
 	t.pruneCooldowns()
 }
 
@@ -232,13 +262,11 @@ func (t *TaskTicker) broadcastStaleEvents(ctx context.Context, tasks []store.Rec
 			continue
 		}
 		seen[task.TeamID] = true
-		bus.BroadcastForTenant(t.msgBus, protocol.EventTeamTaskStale, task.TenantID, protocol.TeamTaskEventPayload{
-			TeamID:    task.TeamID.String(),
-			Status:    store.TeamTaskStatusStale,
-			Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-			ActorType: "system",
-			ActorID:   "task_ticker",
-		})
+		bus.BroadcastForTenant(t.msgBus, protocol.EventTeamTaskStale, task.TenantID, tools.BuildTaskEventPayload(
+			task.TeamID.String(), "",
+			store.TeamTaskStatusStale,
+			"system", "task_ticker",
+		))
 	}
 }
 

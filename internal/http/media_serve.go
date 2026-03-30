@@ -5,21 +5,24 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
-	"strings"
+	"regexp"
 
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/media"
 )
 
+// validMediaID matches safe media identifiers: alphanumeric, hyphens, underscores, dots.
+// Minimum 1 char. Rejects path separators, traversal sequences, and special characters.
+var validMediaID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
 // MediaServeHandler serves persisted media files by ID.
 type MediaServeHandler struct {
 	store *media.Store
-	token string
 }
 
 // NewMediaServeHandler creates a media serve handler.
-func NewMediaServeHandler(store *media.Store, token string) *MediaServeHandler {
-	return &MediaServeHandler{store: store, token: token}
+func NewMediaServeHandler(store *media.Store) *MediaServeHandler {
+	return &MediaServeHandler{store: store}
 }
 
 // RegisterRoutes registers the media serve endpoint.
@@ -41,7 +44,7 @@ func (h *MediaServeHandler) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		// Priority 2: Bearer header (API clients only).
 		provided := extractBearerToken(r)
-		authedReq, ok := requireAuthBearer(h.token, "", provided, w, r)
+		authedReq, ok := requireAuthBearer("", provided, w, r)
 		if !ok {
 			return
 		}
@@ -52,7 +55,7 @@ func (h *MediaServeHandler) auth(next http.HandlerFunc) http.HandlerFunc {
 func (h *MediaServeHandler) handleServe(w http.ResponseWriter, r *http.Request) {
 	locale := extractLocale(r)
 	id := r.PathValue("id")
-	if id == "" || strings.Contains(id, "..") || strings.Contains(id, "/") {
+	if !validMediaID.MatchString(id) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, "invalid media id")})
 		return
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
+	"github.com/nextlevelbuilder/goclaw/internal/providerresolve"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -17,7 +18,6 @@ import (
 type PendingMessagesHandler struct {
 	store       store.PendingMessageStore
 	agentStore  store.AgentStore
-	token       string
 	providerReg *providers.Registry
 	keepRecent  int    // global keepRecent from config (0 = use default 15)
 	maxTokens   int    // max output tokens for LLM summarization (0 = use default)
@@ -25,8 +25,8 @@ type PendingMessagesHandler struct {
 	cfgModel    string // config-level model override (empty = resolve from agent)
 }
 
-func NewPendingMessagesHandler(s store.PendingMessageStore, agentStore store.AgentStore, token string, providerReg *providers.Registry) *PendingMessagesHandler {
-	return &PendingMessagesHandler{store: s, agentStore: agentStore, token: token, providerReg: providerReg}
+func NewPendingMessagesHandler(s store.PendingMessageStore, agentStore store.AgentStore, providerReg *providers.Registry) *PendingMessagesHandler {
+	return &PendingMessagesHandler{store: s, agentStore: agentStore, providerReg: providerReg}
 }
 
 // SetKeepRecent sets the global keepRecent value from config.
@@ -49,7 +49,7 @@ func (h *PendingMessagesHandler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *PendingMessagesHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return requireAuth(h.token, "", next)
+	return requireAuth("", next)
 }
 
 // GET /v1/pending-messages — list all groups with resolved titles
@@ -184,7 +184,7 @@ func (h *PendingMessagesHandler) resolveProviderAndModel(ctx context.Context) (p
 	// Fallback: default agent's provider+model.
 	if h.agentStore != nil {
 		if ag, err := h.agentStore.GetDefault(ctx); err == nil && ag.Provider != "" {
-			if p, err := h.providerReg.GetForTenant(ag.TenantID, ag.Provider); err == nil {
+			if p, err := providerresolve.ResolveConfiguredProvider(h.providerReg, ag); err == nil {
 				model := ag.Model
 				if model == "" {
 					model = p.DefaultModel()

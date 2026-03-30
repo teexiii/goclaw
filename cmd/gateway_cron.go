@@ -3,7 +3,10 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -21,11 +24,18 @@ import (
 // Safe because cron jobs only fire after Start(), well after this is set.
 var cronHeartbeatWakeFn func(agentID string)
 
-func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg *config.Config, channelMgr *channels.Manager) func(job *store.CronJob) (*store.CronJobResult, error) {
+func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg *config.Config, channelMgr *channels.Manager, sessionMgr store.SessionStore, agentStore store.AgentStore) func(job *store.CronJob) (*store.CronJobResult, error) {
 	return func(job *store.CronJob) (*store.CronJobResult, error) {
 		agentID := job.AgentID
 		if agentID == "" {
 			agentID = cfg.ResolveDefaultAgentID()
+		} else if id, err := uuid.Parse(agentID); err == nil && agentStore != nil {
+			// Resolve agentKey from UUID so session key uses agentKey
+			// (consistent with chat/WS/team paths, fixes cache invalidation mismatch).
+			cronCtx := store.WithTenantID(context.Background(), job.TenantID)
+			if ag, err := agentStore.GetByID(cronCtx, id); err == nil {
+				agentID = ag.AgentKey
+			}
 		} else {
 			agentID = config.NormalizeAgentID(agentID)
 		}
@@ -63,6 +73,12 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 		// Build context with tenant scope so agent loop events are scoped correctly.
 		cronCtx := store.WithTenantID(context.Background(), job.TenantID)
 
+		// Reset session before each cron run to prevent tool errors from previous
+		// runs from polluting the context and blocking future executions (#294).
+		// Save() persists the empty session to DB so stale data won't reload after restart.
+		sessionMgr.Reset(cronCtx, sessionKey)
+		sessionMgr.Save(cronCtx, sessionKey)
+
 		// Schedule through cron lane — scheduler handles agent resolution and concurrency
 		outCh := sched.Schedule(cronCtx, scheduler.LaneCron, agent.RunRequest{
 			SessionKey:        sessionKey,
@@ -99,6 +115,9 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			}
 			appendMediaToOutbound(&outMsg, result.Media)
 			msgBus.PublishOutbound(outMsg)
+		} else if job.Payload.Deliver {
+			slog.Warn("cron: delivery configured but channel/chatID missing — output discarded",
+				"job_id", job.ID, "job_name", job.Name, "channel", job.Payload.Channel, "to", job.Payload.To)
 		}
 
 		cronResult := &store.CronJobResult{
@@ -109,9 +128,10 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			cronResult.OutputTokens = result.Usage.CompletionTokens
 		}
 
-		// wakeMode: trigger heartbeat after cron job completes
+		// wakeMode: trigger heartbeat after cron job completes.
+		// Use original job.AgentID (UUID) — cronHeartbeatWakeFn expects UUID for ticker.Wake().
 		if job.Payload.WakeHeartbeat && cronHeartbeatWakeFn != nil {
-			cronHeartbeatWakeFn(agentID)
+			cronHeartbeatWakeFn(job.AgentID)
 		}
 
 		return cronResult, nil

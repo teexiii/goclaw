@@ -136,6 +136,16 @@ func registerProviders(registry *providers.Registry, cfg *config.Config) {
 		slog.Info("registered provider", "name", "ollama-cloud")
 	}
 
+	// Novita AI — OpenAI-compatible endpoint.
+	if cfg.Providers.Novita.APIKey != "" {
+		base := cfg.Providers.Novita.APIBase
+		if base == "" {
+			base = store.NovitaDefaultAPIBase
+		}
+		registry.Register(providers.NewOpenAIProvider("novita", cfg.Providers.Novita.APIKey, base, store.NovitaDefaultModel))
+		slog.Info("registered provider", "name", "novita")
+	}
+
 	// Claude CLI provider (subscription-based, no API key needed)
 	if cfg.Providers.ClaudeCLI.CLIPath != "" {
 		cliPath := cfg.Providers.ClaudeCLI.CLIPath
@@ -233,8 +243,7 @@ func jsonToStringMap(data json.RawMessage) map[string]string {
 // mcpStore is optional; when provided, per-agent MCP servers are injected into CLI config.
 // cfg provides fallback api_base values from config/env when DB providers have none set.
 func registerProvidersFromDB(registry *providers.Registry, provStore store.ProviderStore, secretStore store.ConfigSecretsStore, gatewayAddr, gatewayToken string, mcpStore store.MCPServerStore, cfg *config.Config) {
-	ctx := store.WithCrossTenant(context.Background())
-	dbProviders, err := provStore.ListProviders(ctx)
+	dbProviders, err := provStore.ListAllProviders(context.Background())
 	if err != nil {
 		slog.Warn("failed to load providers from DB", "error", err)
 		return
@@ -280,7 +289,7 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 			if host == "" {
 				host = "http://localhost:11434"
 			}
-			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, "ollama", host+"/v1", "llama3.3"))
+			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, "ollama", config.DockerLocalhost(host+"/v1"), "llama3.3"))
 			slog.Info("registered provider from DB", "name", p.Name)
 			continue
 		}
@@ -298,7 +307,11 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 		switch p.ProviderType {
 		case store.ProviderChatGPTOAuth:
 			ts := oauth.NewDBTokenSource(provStore, secretStore, p.Name).WithTenantID(p.TenantID)
-			registry.RegisterForTenant(p.TenantID, providers.NewCodexProvider(p.Name, ts, p.APIBase, ""))
+			codex := providers.NewCodexProvider(p.Name, ts, p.APIBase, "")
+			if oauthSettings := store.ParseChatGPTOAuthProviderSettings(p.Settings); oauthSettings != nil {
+				codex.WithRoutingDefaults(oauthSettings.CodexPool.Strategy, oauthSettings.CodexPool.ExtraProviderNames)
+			}
+			registry.RegisterForTenant(p.TenantID, codex)
 		case store.ProviderAnthropicNative:
 			registry.RegisterForTenant(p.TenantID, providers.NewAnthropicProvider(p.APIKey,
 				providers.WithAnthropicBaseURL(p.APIBase)))
@@ -338,6 +351,12 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 			prov := providers.NewOpenAIProvider(p.Name, p.APIKey, base, "")
 			prov.WithProviderType(p.ProviderType)
 			registry.RegisterForTenant(p.TenantID, prov)
+		case store.ProviderNovita:
+			base := p.APIBase
+			if base == "" {
+				base = store.NovitaDefaultAPIBase
+			}
+			registry.RegisterForTenant(p.TenantID, providers.NewOpenAIProvider(p.Name, p.APIKey, base, store.NovitaDefaultModel))
 		default:
 			prov := providers.NewOpenAIProvider(p.Name, p.APIKey, p.APIBase, "")
 			prov.WithProviderType(p.ProviderType)

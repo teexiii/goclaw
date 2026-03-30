@@ -17,9 +17,12 @@ func UpdateIdentityField(content, fieldName, newValue string) string {
 		// both "Name: value" and "- **Name:** value" to the same comparison base.
 		stripped := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "-*# \t"))
 		if strings.HasPrefix(stripped, marker) {
-			// Replace only the value, preserving the key prefix including any closing
-			// bold markers after the colon: "- **Name:** old" → "- **Name:** new"
-			colonIdx := strings.LastIndex(line, ":")
+			// Find the marker colon in the original line by locating the marker text,
+			// NOT LastIndex — values may contain colons (e.g. Avatar URLs).
+			markerIdx := strings.Index(stripped, ":")
+			// Map back to original line: find where stripped starts in the original.
+			prefixLen := strings.Index(line, stripped[:markerIdx+1])
+			colonIdx := prefixLen + markerIdx
 			// Include any "**" immediately after the colon so ":**" stays intact.
 			afterColon := line[colonIdx+1:]
 			starLen := len(afterColon) - len(strings.TrimLeft(afterColon, "*"))

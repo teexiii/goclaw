@@ -95,13 +95,16 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 		return ErrorResult("target chat ID is required (no current chat in context)")
 	}
 
-	// Block self-send: agent should not use message tool to send to its own
-	// channel/chat — the response is already dispatched via normal outbound flow.
-	// This prevents duplicate media delivery when announce flow already carries media.
+	// Block text self-send only. File attachment sends (MEDIA: prefix) are always
+	// allowed even to own chat — when write_file is called with deliver=false the
+	// file is NOT auto-delivered, so message(MEDIA:path) is the only delivery path.
+	// Blocking it unconditionally causes a runaway retry loop.
 	ctxChannel := ToolChannelFromCtx(ctx)
 	ctxChatID := ToolChatIDFromCtx(ctx)
-	if ctxChannel != "" && ctxChatID != "" && channel == ctxChannel && target == ctxChatID {
-		return ErrorResult("You are already responding to this chat. Your response (including any MEDIA: references) will be delivered automatically. Do not use the message tool to send to your own chat — just include the content in your response text.")
+	isSelfSend := ctxChannel != "" && ctxChatID != "" && channel == ctxChannel && target == ctxChatID
+	isMediaSend := strings.HasPrefix(strings.TrimSpace(message), "MEDIA:")
+	if isSelfSend && !isMediaSend {
+		return ErrorResult("You are already responding to this chat. Your response text will be delivered automatically. Do not use the message tool to send text to your own chat — just include the content in your response text. To deliver files, use write_file with deliver=true instead.")
 	}
 
 	// Tenant isolation: validate channel belongs to current tenant.

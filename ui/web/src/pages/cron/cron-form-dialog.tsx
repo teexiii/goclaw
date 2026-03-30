@@ -12,8 +12,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { CronSchedule } from "./hooks/use-cron";
 import { slugify, isValidSlug } from "@/lib/slug";
+import { useAgents } from "@/pages/agents/hooks/use-agents";
 
 interface CronFormDialogProps {
   open: boolean;
@@ -33,6 +35,7 @@ type ScheduleKind = "every" | "cron" | "at";
 
 export function CronFormDialog({ open, onOpenChange, onSubmit }: CronFormDialogProps) {
   const { t } = useTranslation("cron");
+  const { agents } = useAgents();
   const [name, setName] = useState("");
   const [message, setMessage] = useState("");
   const [agentId, setAgentId] = useState("");
@@ -94,7 +97,19 @@ export function CronFormDialog({ open, onOpenChange, onSubmit }: CronFormDialogP
 
           <div className="space-y-2">
             <Label>{t("create.agentId")}</Label>
-            <Input value={agentId} onChange={(e) => setAgentId(e.target.value)} placeholder={t("create.agentIdPlaceholder")} />
+            <Select name="agentId" value={agentId || "__default__"} onValueChange={(v) => setAgentId(v === "__default__" ? "" : v)}>
+              <SelectTrigger className="text-base md:text-sm">
+                <SelectValue placeholder={t("create.agentIdPlaceholder")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default__">{t("create.agentIdPlaceholder")}</SelectItem>
+                {agents.map((a) => (
+                  <SelectItem key={a.id} value={a.id}>
+                    {a.display_name || a.agent_key || a.id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="space-y-2">

@@ -37,7 +37,7 @@ func (h *TeamsHandler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *TeamsHandler) auth(next http.HandlerFunc) http.HandlerFunc {
-	return requireAuth(h.token, "", next)
+	return requireAuth("", next)
 }
 
 func (h *TeamsHandler) emitCacheInvalidate() {
@@ -64,7 +64,7 @@ func (h *TeamsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	locale := store.LocaleFromContext(ctx)
 	userID := store.UserIDFromContext(ctx)
-	auth := resolveAuth(r, h.token)
+	auth := resolveAuth(r)
 
 	var teams []store.TeamData
 	var err error
@@ -104,7 +104,7 @@ func (h *TeamsHandler) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-admin callers must have team access.
-	auth := resolveAuth(r, h.token)
+	auth := resolveAuth(r)
 	if !permissions.HasMinRole(auth.Role, permissions.RoleAdmin) {
 		callerID := store.UserIDFromContext(ctx)
 		if ok, err := h.teamStore.HasTeamAccess(ctx, teamID, callerID); err != nil || !ok {

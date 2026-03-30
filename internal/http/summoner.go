@@ -190,8 +190,12 @@ func (s *AgentSummoner) finishSummon(ctx context.Context, agentID, tenantID uuid
 	if frontmatter != "" {
 		updates["frontmatter"] = frontmatter
 	}
+	// Only derive display_name from IDENTITY.md if the user did not already set one.
 	if name := extractIdentityName(identityContent); name != "" {
-		updates["display_name"] = name
+		current, err := s.agents.GetByID(ctx, agentID)
+		if err != nil || current.DisplayName == "" {
+			updates["display_name"] = name
+		}
 	}
 	if len(updates) > 0 {
 		if err := s.agents.Update(ctx, agentID, updates); err != nil {

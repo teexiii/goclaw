@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
@@ -122,35 +123,53 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 			}
 		}
 
-		// Update identity in DB bootstrap — preserve existing fields not being changed.
+		// Update identity in DB bootstrap — targeted field replacement to preserve all other fields.
 		if params.Avatar != "" || params.Name != "" {
-			// Read existing identity to preserve emoji and other fields.
-			existingEmoji, existingAvatar, existingName := "", "", ""
+			// Read existing agent-level IDENTITY.md content.
+			existingContent := ""
 			if dbFiles, err := m.agentStore.GetAgentContextFiles(ctx, ag.ID); err == nil {
 				for _, f := range dbFiles {
 					if f.FileName == "IDENTITY.md" {
-						if identity := parseIdentityContent(f.Content); identity != nil {
-							existingEmoji = identity["Emoji"]
-							existingAvatar = identity["Avatar"]
-							existingName = identity["Name"]
-						}
+						existingContent = f.Content
 						break
 					}
 				}
 			}
-			name := params.Name
-			if name == "" {
-				name = existingName
+
+			// Apply targeted replacements, preserving all other fields (Creature, Purpose, Vibe, etc.).
+			newContent := existingContent
+			if params.Name != "" {
+				newContent = updateNameInContent(newContent, params.Name)
 			}
-			avatar := params.Avatar
-			if avatar == "" {
-				avatar = existingAvatar
+			if params.Avatar != "" {
+				newContent = updateIdentityField(newContent, "Avatar", params.Avatar)
 			}
-			content := buildIdentityContent(name, existingEmoji, avatar)
-			if err := m.agentStore.SetAgentContextFile(ctx, ag.ID, "IDENTITY.md", content); err != nil {
-				slog.Warn("failed to update IDENTITY.md", "agent", params.AgentID, "error", err)
+			// Fallback: if content was empty (no IDENTITY.md yet), build minimal content.
+			if strings.TrimSpace(newContent) == "" {
+				newContent = buildIdentityContent(params.Name, "", params.Avatar)
 			}
-			// Invalidate interceptor cache so updated IDENTITY.md is served immediately
+
+			if err := m.agentStore.SetAgentContextFile(ctx, ag.ID, "IDENTITY.md", newContent); err != nil {
+				slog.Warn("failed to update agent IDENTITY.md", "agent", params.AgentID, "error", err)
+			}
+
+			// For open agents: also update Name in all per-user IDENTITY.md copies.
+			// Per-user files take precedence in LoadContextFiles, so they must be updated too.
+			if params.Name != "" && ag.AgentType == store.AgentTypeOpen {
+				if userFiles, err := m.agentStore.ListUserContextFilesByName(ctx, ag.ID, "IDENTITY.md"); err == nil {
+					for _, uf := range userFiles {
+						updated := updateNameInContent(uf.Content, params.Name)
+						if updated == uf.Content {
+							continue // no change needed
+						}
+						if err := m.agentStore.SetUserContextFile(ctx, ag.ID, uf.UserID, "IDENTITY.md", updated); err != nil {
+							slog.Warn("failed to update user IDENTITY.md on rename", "agent", params.AgentID, "user", uf.UserID, "error", err)
+						}
+					}
+				}
+			}
+
+			// Invalidate interceptor cache so updated IDENTITY.md is served immediately.
 			if m.interceptor != nil {
 				m.interceptor.InvalidateAgent(ag.ID)
 			}
@@ -204,13 +223,18 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 			m.cfg.Agents.List[params.AgentID] = spec
 		}
 
-		if params.Avatar != "" {
+		if params.Avatar != "" || params.Name != "" {
 			ws := spec.Workspace
 			if ws == "" {
 				ws = config.ExpandHome(m.cfg.Agents.Defaults.Workspace)
 			}
 			identityPath := filepath.Join(ws, "IDENTITY.md")
-			appendIdentityFields(identityPath, "", "", params.Avatar)
+			if params.Name != "" {
+				updateNameInFile(identityPath, params.Name)
+			}
+			if params.Avatar != "" {
+				appendIdentityFields(identityPath, "", "", params.Avatar)
+			}
 		}
 
 		if err := config.Save(m.cfgPath, m.cfg); err != nil {

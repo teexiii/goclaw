@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
@@ -161,6 +162,32 @@ func buildIdentityContent(name, emoji, avatar string) string {
 		lines = append(lines, "Avatar: "+avatar)
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// updateNameInContent replaces the Name: line in IDENTITY.md content.
+func updateNameInContent(content, newName string) string {
+	return bootstrap.UpdateIdentityField(content, "Name", newName)
+}
+
+// updateIdentityField delegates to bootstrap.UpdateIdentityField for use within this package.
+func updateIdentityField(content, fieldName, newValue string) string {
+	return bootstrap.UpdateIdentityField(content, fieldName, newValue)
+}
+
+// updateNameInFile reads IDENTITY.md from disk, updates the Name: line, and writes it back.
+// If the file does not exist, falls back to appending the name field.
+func updateNameInFile(path, newName string) {
+	if newName == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// File missing — create it with just the name field.
+		appendIdentityFields(path, newName, "", "")
+		return
+	}
+	updated := updateNameInContent(string(data), newName)
+	os.WriteFile(path, []byte(updated), 0644)
 }
 
 // appendIdentityFields appends Name/Emoji/Avatar to IDENTITY.md.

@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type { CronSchedule } from "./hooks/use-cron";
 import { slugify, isValidSlug } from "@/lib/slug";
@@ -22,6 +23,9 @@ interface CronFormDialogProps {
     schedule: CronSchedule;
     message: string;
     agentId?: string;
+    deliver?: boolean;
+    channel?: string;
+    to?: string;
   }) => Promise<void>;
 }
 
@@ -35,6 +39,9 @@ export function CronFormDialog({ open, onOpenChange, onSubmit }: CronFormDialogP
   const [scheduleKind, setScheduleKind] = useState<ScheduleKind>("every");
   const [everyValue, setEveryValue] = useState("60");
   const [cronExpr, setCronExpr] = useState("0 * * * *");
+  const [deliver, setDeliver] = useState(false);
+  const [channel, setChannel] = useState("");
+  const [to, setTo] = useState("");
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async () => {
@@ -56,11 +63,17 @@ export function CronFormDialog({ open, onOpenChange, onSubmit }: CronFormDialogP
         schedule,
         message: message.trim(),
         agentId: agentId.trim() || undefined,
+        deliver: deliver || undefined,
+        channel: deliver ? channel.trim() || undefined : undefined,
+        to: deliver ? to.trim() || undefined : undefined,
       });
       onOpenChange(false);
       setName("");
       setMessage("");
       setAgentId("");
+      setDeliver(false);
+      setChannel("");
+      setTo("");
     } finally {
       setSaving(false);
     }
@@ -130,6 +143,36 @@ export function CronFormDialog({ open, onOpenChange, onSubmit }: CronFormDialogP
               {t("create.onceDesc")}
             </p>
           )}
+
+          <div className="space-y-3">
+            <Label>{t("detail.delivery")}</Label>
+            <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2.5">
+              <p className="text-sm">{t("detail.deliverToChannel")}</p>
+              <Switch checked={deliver} onCheckedChange={setDeliver} />
+            </div>
+            {deliver && (
+              <div className="space-y-3 pl-1">
+                <div className="space-y-2">
+                  <Label>{t("detail.channelLabel")}</Label>
+                  <Input
+                    value={channel}
+                    onChange={(e) => setChannel(e.target.value)}
+                    placeholder="telegram / zalo / discord"
+                    className="text-base md:text-sm"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>{t("detail.toLabel")}</Label>
+                  <Input
+                    value={to}
+                    onChange={(e) => setTo(e.target.value)}
+                    placeholder={t("detail.toPlaceholder")}
+                    className="text-base md:text-sm"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="space-y-2">
             <Label>{t("create.message")}</Label>

@@ -177,10 +177,22 @@ func (m *CronMethods) handleStatus(_ context.Context, client *gateway.Client, re
 
 func (m *CronMethods) handleUpdate(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	locale := store.LocaleFromContext(ctx)
+	// Accept both nested { patch: {...} } and flat { schedule, message, ... } forms.
+	// The frontend (cron-overview-tab) sends fields flat without a "patch" wrapper.
 	var params struct {
-		JobID string             `json:"jobId"`
-		ID    string             `json:"id"` // alias (matching TS)
-		Patch store.CronJobPatch `json:"patch"`
+		JobID string              `json:"jobId"`
+		ID    string              `json:"id"` // alias
+		Patch *store.CronJobPatch `json:"patch"`
+		// flat fields
+		Schedule       *store.CronSchedule `json:"schedule"`
+		Message        string              `json:"message"`
+		AgentID        *string             `json:"agentId"`
+		Enabled        *bool               `json:"enabled"`
+		Deliver        *bool               `json:"deliver"`
+		Channel        *string             `json:"channel"`
+		To             *string             `json:"to"`
+		DeleteAfterRun *bool               `json:"deleteAfterRun"`
+		WakeHeartbeat  *bool               `json:"wakeHeartbeat"`
 	}
 	if req.Params != nil {
 		json.Unmarshal(req.Params, &params)
@@ -195,6 +207,39 @@ func (m *CronMethods) handleUpdate(ctx context.Context, client *gateway.Client, 
 		return
 	}
 
+	// Build patch: nested "patch" object takes precedence; flat fields fill remaining gaps.
+	var patch store.CronJobPatch
+	if params.Patch != nil {
+		patch = *params.Patch
+	}
+	if patch.Schedule == nil {
+		patch.Schedule = params.Schedule
+	}
+	if patch.Message == "" {
+		patch.Message = params.Message
+	}
+	if patch.AgentID == nil {
+		patch.AgentID = params.AgentID
+	}
+	if patch.Enabled == nil {
+		patch.Enabled = params.Enabled
+	}
+	if patch.Deliver == nil {
+		patch.Deliver = params.Deliver
+	}
+	if patch.Channel == nil {
+		patch.Channel = params.Channel
+	}
+	if patch.To == nil {
+		patch.To = params.To
+	}
+	if patch.DeleteAfterRun == nil {
+		patch.DeleteAfterRun = params.DeleteAfterRun
+	}
+	if patch.WakeHeartbeat == nil {
+		patch.WakeHeartbeat = params.WakeHeartbeat
+	}
+
 	if !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID()) {
 		existing, ok := m.service.GetJob(ctx, jobID)
 		if !ok || existing.UserID != client.UserID() {
@@ -203,7 +248,7 @@ func (m *CronMethods) handleUpdate(ctx context.Context, client *gateway.Client, 
 		}
 	}
 
-	job, err := m.service.UpdateJob(ctx, jobID, params.Patch)
+	job, err := m.service.UpdateJob(ctx, jobID, patch)
 	if err != nil {
 		code := protocol.ErrInvalidRequest
 		if errors.Is(err, store.ErrCronJobNotFound) {

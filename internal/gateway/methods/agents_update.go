@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
@@ -139,10 +139,10 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 			// Apply targeted replacements, preserving all other fields (Creature, Purpose, Vibe, etc.).
 			newContent := existingContent
 			if params.Name != "" {
-				newContent = updateNameInContent(newContent, params.Name)
+				newContent = bootstrap.UpdateIdentityField(newContent, "Name", params.Name)
 			}
 			if params.Avatar != "" {
-				newContent = updateIdentityField(newContent, "Avatar", params.Avatar)
+				newContent = bootstrap.UpdateIdentityField(newContent, "Avatar", params.Avatar)
 			}
 			// Fallback: if content was empty (no IDENTITY.md yet), build minimal content.
 			if strings.TrimSpace(newContent) == "" {
@@ -158,7 +158,7 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 			if params.Name != "" && ag.AgentType == store.AgentTypeOpen {
 				if userFiles, err := m.agentStore.ListUserContextFilesByName(ctx, ag.ID, "IDENTITY.md"); err == nil {
 					for _, uf := range userFiles {
-						updated := updateNameInContent(uf.Content, params.Name)
+						updated := bootstrap.UpdateIdentityField(uf.Content, "Name", params.Name)
 						if updated == uf.Content {
 							continue // no change needed
 						}
@@ -179,68 +179,6 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 		// Also invalidate by UUID — heartbeat/cron sessions cached under UUID key
 		// before the agentKey fix may still be in the router cache.
 		m.agents.InvalidateAgent(ag.ID.String())
-	} else {
-		// --- Fallback: config.json ---
-		spec, ok := m.cfg.Agents.List[params.AgentID]
-		if !ok {
-			if params.AgentID != "default" {
-				client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, i18n.T(locale, i18n.MsgAgentNotFound, params.AgentID)))
-				return
-			}
-		}
-
-		if params.Name != "" {
-			spec.DisplayName = params.Name
-		}
-		if params.Workspace != "" {
-			spec.Workspace = config.ExpandHome(params.Workspace)
-			os.MkdirAll(spec.Workspace, 0755)
-		}
-		if params.Provider != "" {
-			spec.Provider = params.Provider
-		}
-		if params.Model != "" {
-			spec.Model = params.Model
-		}
-		if params.ContextWindow != nil {
-			spec.ContextWindow = *params.ContextWindow
-		}
-		if params.MaxToolIterations != nil {
-			spec.MaxToolIterations = *params.MaxToolIterations
-		}
-
-		if params.AgentID == "default" {
-			if params.Provider != "" {
-				m.cfg.Agents.Defaults.Provider = params.Provider
-			}
-			if params.Model != "" {
-				m.cfg.Agents.Defaults.Model = params.Model
-			}
-			if params.Workspace != "" {
-				m.cfg.Agents.Defaults.Workspace = params.Workspace
-			}
-		} else {
-			m.cfg.Agents.List[params.AgentID] = spec
-		}
-
-		if params.Avatar != "" || params.Name != "" {
-			ws := spec.Workspace
-			if ws == "" {
-				ws = config.ExpandHome(m.cfg.Agents.Defaults.Workspace)
-			}
-			identityPath := filepath.Join(ws, "IDENTITY.md")
-			if params.Name != "" {
-				updateNameInFile(identityPath, params.Name)
-			}
-			if params.Avatar != "" {
-				appendIdentityFields(identityPath, "", "", params.Avatar)
-			}
-		}
-
-		if err := config.Save(m.cfgPath, m.cfg); err != nil {
-			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToSave, "config", err.Error())))
-			return
-		}
 	}
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{

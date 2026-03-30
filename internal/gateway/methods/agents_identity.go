@@ -1,14 +1,10 @@
 package methods
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
@@ -69,35 +65,6 @@ func (m *AgentsMethods) handleIdentityGet(ctx context.Context, client *gateway.C
 				}
 			}
 		}
-	} else {
-		// --- Fallback: config + filesystem ---
-		result["name"] = m.cfg.ResolveDisplayName(params.AgentID)
-
-		if spec, ok := m.cfg.Agents.List[params.AgentID]; ok && spec.Identity != nil {
-			if spec.Identity.Emoji != "" {
-				result["emoji"] = spec.Identity.Emoji
-			}
-			if spec.Identity.Name != "" {
-				result["name"] = spec.Identity.Name
-			}
-		}
-
-		ws := m.resolveWorkspace(params.AgentID)
-		identityPath := filepath.Join(ws, "IDENTITY.md")
-		if identity := parseIdentityFile(identityPath); identity != nil {
-			if identity["Name"] != "" {
-				result["name"] = identity["Name"]
-			}
-			if identity["Emoji"] != "" {
-				result["emoji"] = identity["Emoji"]
-			}
-			if identity["Avatar"] != "" {
-				result["avatar"] = identity["Avatar"]
-			}
-			if identity["Description"] != "" {
-				result["description"] = identity["Description"]
-			}
-		}
 	}
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, result))
@@ -108,32 +75,6 @@ func parseIdentityContent(content string) map[string]string {
 	result := make(map[string]string)
 	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") || line == "" {
-			continue
-		}
-		if idx := strings.Index(line, ":"); idx > 0 {
-			key := strings.TrimSpace(line[:idx])
-			val := strings.TrimSpace(line[idx+1:])
-			if val != "" {
-				result[key] = val
-			}
-		}
-	}
-	return result
-}
-
-// parseIdentityFile reads IDENTITY.md and extracts Key: Value fields.
-func parseIdentityFile(path string) map[string]string {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	result := make(map[string]string)
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "#") || line == "" {
 			continue
 		}
@@ -162,54 +103,4 @@ func buildIdentityContent(name, emoji, avatar string) string {
 		lines = append(lines, "Avatar: "+avatar)
 	}
 	return strings.Join(lines, "\n") + "\n"
-}
-
-// updateNameInContent replaces the Name: line in IDENTITY.md content.
-func updateNameInContent(content, newName string) string {
-	return bootstrap.UpdateIdentityField(content, "Name", newName)
-}
-
-// updateIdentityField delegates to bootstrap.UpdateIdentityField for use within this package.
-func updateIdentityField(content, fieldName, newValue string) string {
-	return bootstrap.UpdateIdentityField(content, fieldName, newValue)
-}
-
-// updateNameInFile reads IDENTITY.md from disk, updates the Name: line, and writes it back.
-// If the file does not exist, falls back to appending the name field.
-func updateNameInFile(path, newName string) {
-	if newName == "" {
-		return
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		// File missing — create it with just the name field.
-		appendIdentityFields(path, newName, "", "")
-		return
-	}
-	updated := updateNameInContent(string(data), newName)
-	os.WriteFile(path, []byte(updated), 0644)
-}
-
-// appendIdentityFields appends Name/Emoji/Avatar to IDENTITY.md.
-func appendIdentityFields(path string, name, emoji, avatar string) {
-	var lines []string
-	if name != "" {
-		lines = append(lines, "Name: "+name)
-	}
-	if emoji != "" {
-		lines = append(lines, "Emoji: "+emoji)
-	}
-	if avatar != "" {
-		lines = append(lines, "Avatar: "+avatar)
-	}
-	if len(lines) == 0 {
-		return
-	}
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	f.WriteString("\n" + strings.Join(lines, "\n") + "\n")
 }

@@ -395,7 +395,7 @@ func (s *Server) SetProvidersHandler(h *httpapi.ProvidersHandler) {
 }
 
 // SetTeamsHandler sets the team CRUD + member management handler.
-func (s *Server) SetTeamsHandler(h *httpapi.TeamsHandler) { s.teamsHandler = h }
+func (s *Server) SetTeamsHandler(h *httpapi.TeamsHandler) { s.handlers = append(s.handlers, h) }
 
 // SetTeamEventsHandler sets the team event history handler.
 func (s *Server) SetTeamEventsHandler(h *httpapi.TeamEventsHandler) {

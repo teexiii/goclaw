@@ -107,7 +107,7 @@ WORKDIR /app
 # Copy binary, migrations, and bundled skills
 COPY --from=builder /out/goclaw /app/goclaw
 COPY --from=builder /out/pkg-helper /app/pkg-helper
-COPY --from=builder /src/migrations/ /app/migrations/
+COPY --from=builder --chown=goclaw:goclaw /src/migrations/ /app/migrations/
 COPY --from=builder /src/skills/ /app/bundled-skills/
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
